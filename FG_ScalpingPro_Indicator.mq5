@@ -1232,7 +1232,7 @@ void CreateExtendedPanel() {
       ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
       ObjectSetInteger(0, name, OBJPROP_XDISTANCE, ExtendedPanelX + 10);
       ObjectSetInteger(0, name, OBJPROP_YDISTANCE, ExtendedPanelY + 7);
-      ObjectSetString(0, name, OBJPROP_TEXT, "Advanced Market Analysis");
+      ObjectSetString(0, name, OBJPROP_TEXT, "FGTrading Advanced Market Analysis");
       ObjectSetString(0, name, OBJPROP_FONT, "Arial Bold");
       ObjectSetInteger(0, name, OBJPROP_FONTSIZE, ExtendedPanelFontSize + 2);
       ObjectSetInteger(0, name, OBJPROP_COLOR, ExtendedPanelColor);

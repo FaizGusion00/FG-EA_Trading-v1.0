@@ -1,5 +1,5 @@
 ===============================================================
-                 FG SCALPINGPRO EA v1.10
+                 FG SCALPINGPRO EA v1.30
                PROFESSIONAL TRADING SYSTEM
 ===============================================================
 
@@ -49,6 +49,13 @@ win rate in optimal market conditions.
     for extended moves
   • Dynamic take-profit targets based on current market phase
 
+► ADVANCED MONITORING & NOTIFICATIONS
+  • Real-time trade probability calculation (0-100%)
+  • Visual dashboard displaying current market conditions
+  • Pre-trade alerts when high-probability setups form
+  • Comprehensive trade execution notifications
+  • Customizable alert thresholds and notification methods
+
 ► PERFORMANCE-FOCUSED DESIGN
   • Comprehensive filtering system to avoid unfavorable
     market conditions
@@ -64,3 +71,28 @@ win rate in optimal market conditions.
 • Recommended Pairs: EURUSD, GBPUSD, USDJPY, AUDUSD
 • Minimum Deposit: $1,000 recommended
 • VPS Recommended for 24/7 operation
+
+===============================================================
+                  VERSION HISTORY (NEW)
+===============================================================
+
+• v1.00: Initial release with core trading functionality
+• v1.10: Added RSI analysis, market phase detection, advanced
+         exit strategies, dynamic multipliers
+• v1.30: Added trade probability calculation, visual dashboard,
+         pre-trade notifications, and execution alerts
+
+===============================================================
+                      SUPPORT & UPDATES
+===============================================================
+
+Enjoy lifetime access to updates and dedicated customer support.
+Our team is committed to ensuring your trading success.
+
+For technical assistance or inquiries:
+Email: support@fgtrading.com
+Website: https://www.fgtrading.com/support
+
+===============================================================
+     "TRANSFORM YOUR TRADING WITH PROFESSIONAL PRECISION"
+===============================================================

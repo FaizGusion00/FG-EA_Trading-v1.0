@@ -1,6 +1,6 @@
-FG SCALPINGPRO EA SOFTWARE LICENSE AGREEMENT
+FG SCALPINGPRO EA v1.30 SOFTWARE LICENSE AGREEMENT
 
-Version 1.0 - Last Updated: 10 April 2025
+Version 1.3 - Last Updated: [Current Date]
 
 IMPORTANT - READ CAREFULLY: This Software License Agreement ("Agreement") is a legal agreement between you (either an individual or a single entity) and FGCompany Original Trading ("Licensor") for the FG ScalpingPro EA software product identified above, which includes computer software and associated media, printed materials, and "online" or electronic documentation ("Software").
 

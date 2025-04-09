@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, FGCompany Original Trading"
 #property link      "https://www.fgtrading.com"
-#property version   "1.00"
+#property version   "1.30"
 #property strict
 #property description "FG ScalpingPro EA - High Probability Trading System"
 
@@ -34,6 +34,19 @@ input double FixedLotSize = 0.01;                // Fixed lot size value
 input int    MinTradeHoldingTime = 15;           // Minimum trade holding time (minutes)
 input int    MaxTradeHoldingTime = 60;           // Maximum trade holding time (minutes)
 input bool   StrictAnalysis = true;              // Stricter entry conditions for higher win rate
+
+// Notification settings
+input string NotificationSettings = "===== Notification Settings ====="; // Notification Settings
+input bool   EnableAlerts = true;                // Enable pop-up alerts
+input bool   EnablePushNotifications = false;    // Enable push notifications to mobile
+input bool   EnableEmailAlerts = false;          // Enable email alerts
+input bool   EnableDashboard = true;             // Enable visual dashboard
+input int    DashboardX = 160;                   // Dashboard X position (centered)
+input int    DashboardY = 5;                     // Dashboard Y position (higher)
+input int    DashboardFontSize = 10;             // Dashboard font size
+input color  DashboardTextColor = clrWhite;      // Dashboard text color
+input color  DashboardBgColor = C'0,0,0';        // Dashboard background color (dark black)
+input int    PreTradeAlertThreshold = 70;        // Alert threshold (0-100) for pre-trade notifications
 
 // Indicator parameters 
 input string BBSettings = "===== Bollinger Bands Settings ====="; // Bollinger Bands Settings
@@ -122,6 +135,18 @@ double DailyStartBalance;                         // Daily starting balance
 datetime DailyResetTime;                          // Time to reset daily stats
 double Close[];                                   // Close prices array
 ENUM_TRADE_SIGNAL CurrentSignal = SIGNAL_NONE;    // Current trade signal
+int CurrentProbability = 0;                       // Current trade probability (0-100)
+datetime LastAlertTime = 0;                       // Time of the last alert
+int SignalTimer = 0;                              // Timer for signal duration
+
+// Dashboard object names
+string DashboardBackground = "FG_Dashboard_BG";
+string DashboardTitle = "FG_Dashboard_Title";
+string DashboardSignal = "FG_Dashboard_Signal";
+string DashboardPhase = "FG_Dashboard_Phase";
+string DashboardProbability = "FG_Dashboard_Probability";
+string DashboardRSI = "FG_Dashboard_RSI";
+string DashboardATR = "FG_Dashboard_ATR";
 
 // Trade tracking variables
 struct TradeInfo {
@@ -147,7 +172,8 @@ int RSI_Handle;
 // Market phase tracking
 enum ENUM_MARKET_PHASE {
    PHASE_UNKNOWN,   // Unknown market phase
-   PHASE_TRENDING,  // Trending market
+   PHASE_UPTREND,   // Uptrend (bullish) market
+   PHASE_DOWNTREND, // Downtrend (bearish) market
    PHASE_RANGING,   // Ranging market
    PHASE_VOLATILE   // Volatile market
 };
@@ -199,7 +225,12 @@ int OnInit() {
    // Load existing positions
    LoadExistingPositions();
    
-   Print("FG ScalpingPro EA initialized successfully");
+   // Create dashboard if enabled
+   if(EnableDashboard) {
+      CreateDashboard();
+   }
+   
+   Print("FG ScalpingPro EA v1.30 initialized successfully");
    
    return(INIT_SUCCEEDED);
 }
@@ -215,6 +246,11 @@ void OnDeinit(const int reason) {
    IndicatorRelease(ATR_Handle);
    IndicatorRelease(RSI_Handle);
    
+   // Remove dashboard objects
+   if(EnableDashboard) {
+      DeleteDashboard();
+   }
+   
    Print("FG ScalpingPro EA removed");
 }
 
@@ -225,23 +261,75 @@ void OnTick() {
    // Skip if automatic trading is disabled
    if(!EnableTrading) return;
    
-   // Update indicator data
-   if(!UpdateIndicators()) return;
+   // Update indicator data - add detailed error checking
+   if(!UpdateIndicators()) {
+      Print("ERROR: Failed to update indicators, check buffers");
+      // Update dashboard anyway with what we have
+      if(EnableDashboard) {
+         UpdateDashboard();
+      }
+      return;
+   }
    
    // Update and manage existing positions first
    UpdateActiveTrades();
    ManagePositions();
    
+   // Check for new signals and calculate probability on EVERY tick
+   ENUM_TRADE_SIGNAL newSignal = GetTradeSignal();
+   
+   // Always calculate probability on each tick for real-time updates
+   CurrentProbability = CalculateTradeProbability(newSignal);
+   
+   // Debug print to verify calculation
+   Print("DEBUG: Current Probability = ", CurrentProbability, 
+         "%, Signal = ", SignalToString(newSignal), 
+         ", RSI = ", DoubleToString(RSI_Buffer[0], 1),
+         ", ATR = ", DoubleToString(ATR_Buffer[0], 5),
+         ", EMA_Fast = ", DoubleToString(EMA_Fast[0], 5),
+         ", EMA_Slow = ", DoubleToString(EMA_Slow[0], 5));
+   
+   // If signal changed, reset the timer
+   if(newSignal != CurrentSignal) {
+      SignalTimer = 0;
+   }
+   else {
+      SignalTimer++; // Increase timer when signal persists
+   }
+   
+   // Update current signal
+   CurrentSignal = newSignal;
+   
+   // Update dashboard if enabled - ensure it's always updated every tick
+   if(EnableDashboard) {
+      UpdateDashboard();
+   }
+   
+   // Send pre-trade alert if probability is high
+   if(CurrentSignal != SIGNAL_NONE && CurrentProbability >= PreTradeAlertThreshold) {
+      // Only alert once every 5 minutes for the same signal
+      if(TimeCurrent() - LastAlertTime > 300) {
+         SendPreTradeAlert();
+         LastAlertTime = TimeCurrent();
+      }
+   }
+   
    // Check if we can open new trades
    int currentTrades = ArraySize(ActiveTrades);
    if(currentTrades < MaxTrades) {
-      // Check for new entry signals
-      CurrentSignal = GetTradeSignal();
-      
-      // Execute trades based on signals
+      // Execute trades based on signals if they pass filters
       if(CurrentSignal != SIGNAL_NONE && CheckFilters()) {
          ExecuteTrade(CurrentSignal);
       }
+   }
+}
+
+// Helper function to convert signal to string for debugging
+string SignalToString(ENUM_TRADE_SIGNAL signal) {
+   switch(signal) {
+      case SIGNAL_BUY: return "BUY";
+      case SIGNAL_SELL: return "SELL";
+      default: return "NONE";
    }
 }
 
@@ -310,24 +398,77 @@ void UpdateActiveTrades() {
 //| Update all indicator values                                      |
 //+------------------------------------------------------------------+
 bool UpdateIndicators() {
-   // Copy indicator data
-   if(CopyBuffer(BB_Handle, 0, 0, 3, BB_Upper) <= 0) return false;
-   if(CopyBuffer(BB_Handle, 1, 0, 3, BB_Middle) <= 0) return false;
-   if(CopyBuffer(BB_Handle, 2, 0, 3, BB_Lower) <= 0) return false;
-   if(CopyBuffer(EMA_Fast_Handle, 0, 0, 3, EMA_Fast) <= 0) return false;
-   if(CopyBuffer(EMA_Slow_Handle, 0, 0, 3, EMA_Slow) <= 0) return false;
-   if(CopyBuffer(ATR_Handle, 0, 0, 3, ATR_Buffer) <= 0) return false;
-   if(CopyBuffer(RSI_Handle, 0, 0, 3, RSI_Buffer) <= 0) return false;
+   // Initialize Close prices first
+   if(CopyClose(_Symbol, PERIOD_CURRENT, 0, 10, Close) <= 0) {
+      Print("Error copying close price data: ", GetLastError());
+      return false;
+   }
    
-   // Get close prices
-   if(CopyClose(_Symbol, PERIOD_CURRENT, 0, 3, Close) <= 0) return false;
+   // Use larger buffer size for indicators (10 instead of 3)
+   // This prevents zeros when history isn't fully loaded
+   
+   // Copy BB indicator data with error checking
+   int bb_copied = CopyBuffer(BB_Handle, 0, 0, 10, BB_Upper);
+   if(bb_copied <= 0) {
+      Print("Error copying BB Upper buffer: ", GetLastError());
+      return false;
+   }
+   
+   bb_copied = CopyBuffer(BB_Handle, 1, 0, 10, BB_Middle);
+   if(bb_copied <= 0) {
+      Print("Error copying BB Middle buffer: ", GetLastError());
+      return false;
+   }
+   
+   bb_copied = CopyBuffer(BB_Handle, 2, 0, 10, BB_Lower);
+   if(bb_copied <= 0) {
+      Print("Error copying BB Lower buffer: ", GetLastError());
+      return false;
+   }
+   
+   // Copy EMA indicator data with error checking
+   int ema_copied = CopyBuffer(EMA_Fast_Handle, 0, 0, 10, EMA_Fast);
+   if(ema_copied <= 0) {
+      Print("Error copying EMA Fast buffer: ", GetLastError());
+      return false;
+   }
+   
+   ema_copied = CopyBuffer(EMA_Slow_Handle, 0, 0, 10, EMA_Slow);
+   if(ema_copied <= 0) {
+      Print("Error copying EMA Slow buffer: ", GetLastError());
+      return false;
+   }
+   
+   // Copy ATR indicator data with error checking
+   int atr_copied = CopyBuffer(ATR_Handle, 0, 0, 10, ATR_Buffer);
+   if(atr_copied <= 0) {
+      Print("Error copying ATR buffer: ", GetLastError());
+      return false;
+   }
+   
+   // Copy RSI indicator data with error checking
+   int rsi_copied = CopyBuffer(RSI_Handle, 0, 0, 10, RSI_Buffer);
+   if(rsi_copied <= 0) {
+      Print("Error copying RSI buffer: ", GetLastError());
+      return false;
+   }
    
    // Get volume data
-   if(CopyTickVolume(_Symbol, PERIOD_CURRENT, 0, Volume_Period + 1, Volume_Buffer) <= 0) return false;
+   int vol_copied = CopyTickVolume(_Symbol, PERIOD_CURRENT, 0, Volume_Period + 10, Volume_Buffer);
+   if(vol_copied <= 0) {
+      Print("Error copying Volume buffer: ", GetLastError());
+      return false;
+   }
+   
+   // Verify that buffer elements aren't zero
+   if(ATR_Buffer[0] == 0 || RSI_Buffer[0] == 0) {
+      Print("Warning: Indicator returned zero values: ATR=", ATR_Buffer[0], ", RSI=", RSI_Buffer[0]);
+      // Don't return false here, we'll use whatever we have
+   }
    
    // Calculate Volume SMA
    long volumeSum = 0;
-   for(int i = 1; i <= Volume_Period; i++) {
+   for(int i = 1; i <= Volume_Period && i < vol_copied; i++) {
       volumeSum += Volume_Buffer[i];
    }
    Volume_SMA = (double)volumeSum / Volume_Period;
@@ -348,15 +489,19 @@ void DetectMarketPhase() {
    // Get Bollinger Band width (volatility indicator)
    double bbWidth = (BB_Upper[0] - BB_Lower[0]) / BB_Middle[0];
    
-   // Get trend strength 
-   double trendStrength = MathAbs(EMA_Fast[0] - EMA_Slow[0]) / ATR_Buffer[0];
+   // Calculate trend strength with direction
+   double trendStrength = (EMA_Fast[0] - EMA_Slow[0]) / ATR_Buffer[0];
    
    // Get ATR change to detect volatility changes
    double atrChange = (ATR_Buffer[0] - ATR_Buffer[2]) / ATR_Buffer[2];
    
    // Determine market phase
-   if(trendStrength > 0.5) {
-      CurrentMarketPhase = PHASE_TRENDING;
+   if(MathAbs(trendStrength) > 0.5) {
+      if(trendStrength > 0) {
+         CurrentMarketPhase = PHASE_UPTREND;  // Positive trend strength = uptrend
+      } else {
+         CurrentMarketPhase = PHASE_DOWNTREND; // Negative trend strength = downtrend
+      }
    }
    else if(bbWidth < 0.015) {
       CurrentMarketPhase = PHASE_RANGING;
@@ -367,6 +512,14 @@ void DetectMarketPhase() {
    else {
       CurrentMarketPhase = PHASE_UNKNOWN;
    }
+   
+   // Debug output to verify market phase detection
+   Print("DEBUG: Market Phase Detection - EMA_Fast:", EMA_Fast[0], 
+         " EMA_Slow:", EMA_Slow[0], 
+         " TrendStrength:", trendStrength, 
+         " BBWidth:", bbWidth, 
+         " ATRChange:", atrChange, 
+         " Phase:", MarketPhaseToString(CurrentMarketPhase));
 }
 
 //+------------------------------------------------------------------+
@@ -514,6 +667,345 @@ ENUM_TRADE_SIGNAL GetTradeSignal() {
 }
 
 //+------------------------------------------------------------------+
+//| Calculate trade probability based on indicator readings          |
+//+------------------------------------------------------------------+
+int CalculateTradeProbability(ENUM_TRADE_SIGNAL signal) {
+   int probability = 0;
+   
+   // Force a minimum base probability for debugging
+   probability = 5;
+   
+   // Even if no signal, calculate a probability based on market conditions
+   if(signal == SIGNAL_NONE) {
+      // Check if close to generating a signal
+      bool potentialBuy = (EMA_Fast[0] > EMA_Slow[0] && Close[0] > EMA_Fast[0]);
+      bool potentialSell = (EMA_Fast[0] < EMA_Slow[0] && Close[0] < EMA_Fast[0]);
+      
+      if(potentialBuy || potentialSell) {
+         probability = 20; // Base probability for potential signal
+      }
+   } else {
+      // Base score - having a valid signal gives 40 points
+      probability = 40;
+   }
+   
+   // Add points based on trend strength
+   double emaSeparation = MathAbs(EMA_Fast[0] - EMA_Slow[0]) / ATR_Buffer[0];
+   int trendPoints = (int)MathMin(emaSeparation * 50, 20);
+   probability += trendPoints;
+   
+   // Add points based on RSI strength
+   if(signal == SIGNAL_BUY || (signal == SIGNAL_NONE && EMA_Fast[0] > EMA_Slow[0])) {
+      // For buy, better if RSI was recently oversold and now rising
+      if(RSI_Buffer[1] < RSI_Oversold || RSI_Buffer[2] < RSI_Oversold) {
+         probability += 15;
+      }
+      
+      // Strength of RSI momentum
+      double rsiMomentum = RSI_Buffer[0] - RSI_Buffer[1];
+      probability += (int)MathMin(rsiMomentum * 2, 10);
+   }
+   else if(signal == SIGNAL_SELL || (signal == SIGNAL_NONE && EMA_Fast[0] < EMA_Slow[0])) {
+      // For sell, better if RSI was recently overbought and now falling
+      if(RSI_Buffer[1] > RSI_Overbought || RSI_Buffer[2] > RSI_Overbought) {
+         probability += 15;
+      }
+      
+      // Strength of RSI momentum
+      double rsiMomentum = RSI_Buffer[1] - RSI_Buffer[0];
+      probability += (int)MathMin(rsiMomentum * 2, 10);
+   }
+   
+   // Add points based on volume strength
+   double volumeRatio = (double)Volume_Buffer[0] / Volume_SMA;
+   int volumePoints = (int)MathMin((volumeRatio - 1.0) * 30, 15);
+   if(volumePoints > 0) probability += volumePoints;
+   
+   // Add points if signal persists (stability factor)
+   probability += (int)MathMin(SignalTimer, 10);
+   
+   // Market condition factor - updated for more specific market phases
+   switch(CurrentMarketPhase) {
+      case PHASE_UPTREND:
+         // Higher probability for buy signals in uptrend
+         if(signal == SIGNAL_BUY) probability += 10;
+         else if(signal == SIGNAL_SELL) probability -= 5; // Counter-trend trade
+         break;
+      case PHASE_DOWNTREND:
+         // Higher probability for sell signals in downtrend
+         if(signal == SIGNAL_SELL) probability += 10;
+         else if(signal == SIGNAL_BUY) probability -= 5; // Counter-trend trade
+         break;
+      case PHASE_RANGING:
+         // Lower probability in ranging markets
+         probability -= 5;
+         break;
+      case PHASE_VOLATILE:
+         // Higher risk in volatile markets
+         probability -= 3;
+         break;
+   }
+   
+   // Make sure probability is never below 5%
+   probability = MathMax(probability, 5);
+   
+   // Cap at 100
+   probability = MathMin(probability, 100);
+   
+   return probability;
+}
+
+//+------------------------------------------------------------------+
+//| Create dashboard objects                                         |
+//+------------------------------------------------------------------+
+void CreateDashboard() {
+   // Get chart width to center the dashboard
+   int chartWidth = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+   int dashboardWidth = 180;  // Slightly smaller width
+   
+   // Calculate center position
+   int centerX = (chartWidth / 2) - (dashboardWidth / 2);
+   
+   // Create background
+   ObjectCreate(0, DashboardBackground, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_XDISTANCE, centerX > 0 ? centerX : DashboardX);
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_YDISTANCE, DashboardY);
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_XSIZE, dashboardWidth);
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_YSIZE, 150); // Increased height to prevent overflow
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_COLOR, DashboardTextColor);
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_BGCOLOR, DashboardBgColor);
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_BACK, false);
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_SELECTED, false);
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, DashboardBackground, OBJPROP_ZORDER, 0);
+   
+   // Create title
+   ObjectCreate(0, DashboardTitle, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, DashboardTitle, OBJPROP_XDISTANCE, centerX > 0 ? centerX + 10 : DashboardX + 10);
+   ObjectSetInteger(0, DashboardTitle, OBJPROP_YDISTANCE, DashboardY + 10);
+   ObjectSetInteger(0, DashboardTitle, OBJPROP_COLOR, DashboardTextColor);
+   ObjectSetInteger(0, DashboardTitle, OBJPROP_FONTSIZE, DashboardFontSize);
+   ObjectSetInteger(0, DashboardTitle, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetString(0, DashboardTitle, OBJPROP_FONT, "Arial Bold");
+   ObjectSetString(0, DashboardTitle, OBJPROP_TEXT, "FG ScalpingPro v1.30");
+   
+   // Move probability up to top position (make it first element after title)
+   ObjectCreate(0, DashboardProbability, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, DashboardProbability, OBJPROP_XDISTANCE, centerX > 0 ? centerX + 10 : DashboardX + 10);
+   ObjectSetInteger(0, DashboardProbability, OBJPROP_YDISTANCE, DashboardY + 30);
+   ObjectSetInteger(0, DashboardProbability, OBJPROP_COLOR, DashboardTextColor);
+   ObjectSetInteger(0, DashboardProbability, OBJPROP_FONTSIZE, DashboardFontSize);
+   ObjectSetInteger(0, DashboardProbability, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetString(0, DashboardProbability, OBJPROP_FONT, "Arial");
+   ObjectSetString(0, DashboardProbability, OBJPROP_TEXT, "Trade Probability: 0%");
+   
+   // Create signal label (moved down)
+   ObjectCreate(0, DashboardSignal, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, DashboardSignal, OBJPROP_XDISTANCE, centerX > 0 ? centerX + 10 : DashboardX + 10);
+   ObjectSetInteger(0, DashboardSignal, OBJPROP_YDISTANCE, DashboardY + 50);
+   ObjectSetInteger(0, DashboardSignal, OBJPROP_COLOR, DashboardTextColor);
+   ObjectSetInteger(0, DashboardSignal, OBJPROP_FONTSIZE, DashboardFontSize);
+   ObjectSetInteger(0, DashboardSignal, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetString(0, DashboardSignal, OBJPROP_FONT, "Arial");
+   ObjectSetString(0, DashboardSignal, OBJPROP_TEXT, "Signal: MONITORING");
+   
+   // Create market phase label (moved down)
+   ObjectCreate(0, DashboardPhase, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, DashboardPhase, OBJPROP_XDISTANCE, centerX > 0 ? centerX + 10 : DashboardX + 10);
+   ObjectSetInteger(0, DashboardPhase, OBJPROP_YDISTANCE, DashboardY + 70);
+   ObjectSetInteger(0, DashboardPhase, OBJPROP_COLOR, DashboardTextColor);
+   ObjectSetInteger(0, DashboardPhase, OBJPROP_FONTSIZE, DashboardFontSize);
+   ObjectSetInteger(0, DashboardPhase, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetString(0, DashboardPhase, OBJPROP_FONT, "Arial");
+   ObjectSetString(0, DashboardPhase, OBJPROP_TEXT, "Market Phase: UNKNOWN");
+   
+   // Create RSI label (moved down)
+   ObjectCreate(0, DashboardRSI, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, DashboardRSI, OBJPROP_XDISTANCE, centerX > 0 ? centerX + 10 : DashboardX + 10);
+   ObjectSetInteger(0, DashboardRSI, OBJPROP_YDISTANCE, DashboardY + 90);
+   ObjectSetInteger(0, DashboardRSI, OBJPROP_COLOR, DashboardTextColor);
+   ObjectSetInteger(0, DashboardRSI, OBJPROP_FONTSIZE, DashboardFontSize);
+   ObjectSetInteger(0, DashboardRSI, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetString(0, DashboardRSI, OBJPROP_FONT, "Arial");
+   ObjectSetString(0, DashboardRSI, OBJPROP_TEXT, "RSI: 0.0");
+   
+   // Create ATR label (moved down with more room for overflow)
+   ObjectCreate(0, DashboardATR, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, DashboardATR, OBJPROP_XDISTANCE, centerX > 0 ? centerX + 10 : DashboardX + 10);
+   ObjectSetInteger(0, DashboardATR, OBJPROP_YDISTANCE, DashboardY + 110);
+   ObjectSetInteger(0, DashboardATR, OBJPROP_COLOR, DashboardTextColor);
+   ObjectSetInteger(0, DashboardATR, OBJPROP_FONTSIZE, DashboardFontSize);
+   ObjectSetInteger(0, DashboardATR, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetString(0, DashboardATR, OBJPROP_FONT, "Arial");
+   ObjectSetString(0, DashboardATR, OBJPROP_TEXT, "ATR: 0.0");
+}
+
+//+------------------------------------------------------------------+
+//| Update dashboard with current information                        |
+//+------------------------------------------------------------------+
+void UpdateDashboard() {
+   // Make sure we recalculate probability before updating dashboard
+   // This ensures the most current value is displayed
+   if(CurrentProbability <= 0) {
+      CurrentProbability = CalculateTradeProbability(CurrentSignal);
+   }
+
+   // Update signal
+   string signalText = "Signal: ";
+   color signalColor = DashboardTextColor;
+   
+   switch(CurrentSignal) {
+      case SIGNAL_BUY:
+         signalText += "BUY";
+         signalColor = clrLime;
+         break;
+      case SIGNAL_SELL:
+         signalText += "SELL";
+         signalColor = clrRed;
+         break;
+      default:
+         signalText += "MONITORING";
+         break;
+   }
+   
+   ObjectSetString(0, DashboardSignal, OBJPROP_TEXT, signalText);
+   ObjectSetInteger(0, DashboardSignal, OBJPROP_COLOR, signalColor);
+   
+   // Update market phase
+   string phaseText = "Market Phase: ";
+   color phaseColor = DashboardTextColor;
+   
+   switch(CurrentMarketPhase) {
+      case PHASE_UPTREND:
+         phaseText += "UPTREND";
+         phaseColor = clrLime;
+         break;
+      case PHASE_DOWNTREND:
+         phaseText += "DOWNTREND";
+         phaseColor = clrRed;
+         break;
+      case PHASE_RANGING:
+         phaseText += "RANGING";
+         phaseColor = clrGold;
+         break;
+      case PHASE_VOLATILE:
+         phaseText += "VOLATILE";
+         phaseColor = clrMagenta;
+         break;
+      default:
+         phaseText += "UNKNOWN";
+         break;
+   }
+   
+   ObjectSetString(0, DashboardPhase, OBJPROP_TEXT, phaseText);
+   ObjectSetInteger(0, DashboardPhase, OBJPROP_COLOR, phaseColor);
+   
+   // Update probability - Debug directly to make sure value is correct
+   string probText = "Trade Probability: " + IntegerToString(CurrentProbability) + "%";
+   color probColor = DashboardTextColor;
+   
+   if(CurrentProbability >= 80) probColor = clrLime;
+   else if(CurrentProbability >= 60) probColor = clrYellow;
+   else if(CurrentProbability >= 40) probColor = clrOrange;
+   else if(CurrentProbability >= 20) probColor = clrPink;
+   else probColor = clrRed; // Low probability
+   
+   ObjectSetString(0, DashboardProbability, OBJPROP_TEXT, probText);
+   ObjectSetInteger(0, DashboardProbability, OBJPROP_COLOR, probColor);
+   
+   // Update RSI - protect against invalid values
+   double rsiValue = RSI_Buffer[0];
+   if(rsiValue <= 0 || rsiValue > 100) {
+      rsiValue = 50.0; // Use neutral value if invalid
+      Print("Warning: Invalid RSI value, using default");
+   }
+   
+   color rsiColor = DashboardTextColor;
+   if(rsiValue > RSI_Overbought) rsiColor = clrRed;
+   else if(rsiValue < RSI_Oversold) rsiColor = clrLime;
+   
+   ObjectSetString(0, DashboardRSI, OBJPROP_TEXT, "RSI: " + DoubleToString(rsiValue, 1));
+   ObjectSetInteger(0, DashboardRSI, OBJPROP_COLOR, rsiColor);
+   
+   // Update ATR - protect against invalid values
+   double atrValue = ATR_Buffer[0];
+   if(atrValue <= 0) {
+      atrValue = _Point * 10; // Use small default value if invalid
+      Print("Warning: Invalid ATR value, using default");
+   }
+   
+   double atrPoints = atrValue / _Point;
+   color atrColor = DashboardTextColor;
+   if(atrPoints > ATR_MinValue * 2) atrColor = clrRed; // High volatility
+   else if(atrPoints < ATR_MinValue) atrColor = clrYellow; // Low volatility
+   
+   ObjectSetString(0, DashboardATR, OBJPROP_TEXT, "ATR: " + DoubleToString(atrPoints, 1) + " pts");
+   ObjectSetInteger(0, DashboardATR, OBJPROP_COLOR, atrColor);
+   
+   // Force chart redraw
+   ChartRedraw(0);
+}
+
+//+------------------------------------------------------------------+
+//| Delete dashboard objects                                         |
+//+------------------------------------------------------------------+
+void DeleteDashboard() {
+   ObjectDelete(0, DashboardBackground);
+   ObjectDelete(0, DashboardTitle);
+   ObjectDelete(0, DashboardSignal);
+   ObjectDelete(0, DashboardPhase);
+   ObjectDelete(0, DashboardProbability);
+   ObjectDelete(0, DashboardRSI);
+   ObjectDelete(0, DashboardATR);
+}
+
+//+------------------------------------------------------------------+
+//| Send pre-trade alert with information about potential trade      |
+//+------------------------------------------------------------------+
+void SendPreTradeAlert() {
+   if(!EnableAlerts && !EnablePushNotifications && !EnableEmailAlerts) return;
+   
+   string direction = (CurrentSignal == SIGNAL_BUY) ? "BUY" : "SELL";
+   string message = "FG ScalpingPro: High probability " + direction + " signal forming\n" +
+                   "Symbol: " + _Symbol + "\n" +
+                   "Probability: " + IntegerToString(CurrentProbability) + "%\n" +
+                   "Market Phase: " + MarketPhaseToString(CurrentMarketPhase) + "\n" +
+                   "RSI: " + DoubleToString(RSI_Buffer[0], 1) + "\n" +
+                   "Time: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES);
+   
+   if(EnableAlerts) {
+      Alert(message);
+      PlaySound("alert.wav");
+   }
+   
+   if(EnablePushNotifications) {
+      SendNotification(message);
+   }
+   
+   if(EnableEmailAlerts) {
+      SendMail("FG ScalpingPro Pre-Trade Alert", message);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Convert market phase enum to string                             |
+//+------------------------------------------------------------------+
+string MarketPhaseToString(ENUM_MARKET_PHASE phase) {
+   switch(phase) {
+      case PHASE_UPTREND: return "UPTREND";
+      case PHASE_DOWNTREND: return "DOWNTREND";
+      case PHASE_RANGING: return "RANGING";
+      case PHASE_VOLATILE: return "VOLATILE";
+      default: return "UNKNOWN";
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Execute trade based on signal                                    |
 //+------------------------------------------------------------------+
 void ExecuteTrade(ENUM_TRADE_SIGNAL signal) {
@@ -531,11 +1023,11 @@ void ExecuteTrade(ENUM_TRADE_SIGNAL signal) {
    // Adjust multipliers based on market phase if enabled
    if(UseDynamicMultiplier) {
       switch(CurrentMarketPhase) {
-         case PHASE_TRENDING:
-            tpMultiplier *= 1.5; // Higher TP in trending markets
+         case PHASE_UPTREND:
+            tpMultiplier *= 1.5; // Higher TP in uptrend
             break;
-         case PHASE_RANGING:
-            tpMultiplier *= 0.8; // Lower TP in ranging markets
+         case PHASE_DOWNTREND:
+            tpMultiplier *= 0.8; // Lower TP in downtrend
             break;
          case PHASE_VOLATILE:
             slMultiplier *= 1.2; // Wider SL in volatile markets
@@ -627,6 +1119,33 @@ void ExecuteTrade(ENUM_TRADE_SIGNAL signal) {
                ", TP: ", tp,
                ", ATR: ", DoubleToString(atrValue, 5),
                ", RSI: ", DoubleToString(RSI_Buffer[0], 2));
+         
+         // Prepare trade notification
+         string tradeInfo = "FG ScalpingPro: BUY Order Executed\n" +
+                    "Symbol: " + _Symbol + "\n" +
+                    "Entry: " + DoubleToString(ask, digits) + "\n" +
+                    "Stop Loss: " + DoubleToString(sl, digits) + "\n" +
+                    "Take Profit: " + DoubleToString(tp, digits) + "\n" +
+                    "Lot Size: " + DoubleToString(lotSize, 2) + "\n" +
+                    "Probability: " + IntegerToString(CurrentProbability) + "%\n" +
+                    "Market Phase: " + MarketPhaseToString(CurrentMarketPhase);
+         bool tradeExecuted = true;
+         
+         // Send trade execution notification if trade was successful
+         if(tradeExecuted) {
+            if(EnableAlerts) {
+               Alert(tradeInfo);
+               PlaySound("alert2.wav"); // Different sound for execution
+            }
+            
+            if(EnablePushNotifications) {
+               SendNotification(tradeInfo);
+            }
+            
+            if(EnableEmailAlerts) {
+               SendMail("FG ScalpingPro Trade Executed", tradeInfo);
+            }
+         }
       }
    }
    else if(signal == SIGNAL_SELL) {
@@ -653,6 +1172,33 @@ void ExecuteTrade(ENUM_TRADE_SIGNAL signal) {
                ", TP: ", tp,
                ", ATR: ", DoubleToString(atrValue, 5),
                ", RSI: ", DoubleToString(RSI_Buffer[0], 2));
+         
+         // Prepare trade notification
+         string tradeInfo = "FG ScalpingPro: SELL Order Executed\n" +
+                    "Symbol: " + _Symbol + "\n" +
+                    "Entry: " + DoubleToString(bid, digits) + "\n" +
+                    "Stop Loss: " + DoubleToString(sl, digits) + "\n" +
+                    "Take Profit: " + DoubleToString(tp, digits) + "\n" +
+                    "Lot Size: " + DoubleToString(lotSize, 2) + "\n" +
+                    "Probability: " + IntegerToString(CurrentProbability) + "%\n" +
+                    "Market Phase: " + MarketPhaseToString(CurrentMarketPhase);
+         bool tradeExecuted = true;
+         
+         // Send trade execution notification if trade was successful
+         if(tradeExecuted) {
+            if(EnableAlerts) {
+               Alert(tradeInfo);
+               PlaySound("alert2.wav"); // Different sound for execution
+            }
+            
+            if(EnablePushNotifications) {
+               SendNotification(tradeInfo);
+            }
+            
+            if(EnableEmailAlerts) {
+               SendMail("FG ScalpingPro Trade Executed", tradeInfo);
+            }
+         }
       }
    }
 }
