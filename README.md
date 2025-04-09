@@ -242,7 +242,7 @@ Multiple layers of filters designed to avoid poor trading conditions:
 ## Version History
 
 - **v1.00**: Initial release with basic functionality
-- **v1.10**: Added RSI analysis, market phase detection, advanced exit strategies (trailing stops and partial closes), dynamic ATR multipliers, daily loss limits, and comprehensive backtesting tools
+- **v1.1**: Added RSI analysis, market phase detection, advanced exit strategies (trailing stops and partial closes), dynamic ATR multipliers, daily loss limits, and comprehensive backtesting tools
 
 ## Support & Contact
 For support, updates, or questions, please contact:
