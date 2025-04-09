@@ -1,0 +1,66 @@
+===============================================================
+                 FG SCALPINGPRO EA v1.10
+               PROFESSIONAL TRADING SYSTEM
+===============================================================
+
+Developed by: Faiz Nasir
+Company: FGCompany Original Trading
+Website: https://www.fgtrading.com
+Copyright © 2025 | All Rights Reserved
+
+===============================================================
+                      INTRODUCTION
+===============================================================
+
+The FG ScalpingPro EA is an advanced algorithmic trading system 
+designed to deliver consistent profits in the forex market 
+through intelligent analysis and precision execution. Employing 
+a sophisticated multi-indicator approach and adaptive trading 
+logic, this professional-grade Expert Advisor targets a 90%+ 
+win rate in optimal market conditions.
+
+===============================================================
+                  COMPETITIVE ADVANTAGES
+===============================================================
+
+► INTELLIGENT MARKET ANALYSIS
+  • Multi-indicator fusion technology combines Bollinger Bands,
+    EMAs, RSI, and volume analysis
+  • Advanced pattern recognition identifies only high-probability
+    trade setups
+  • Real-time market phase detection for optimal strategy
+    adaptation
+
+► ADAPTIVE TRADING METHODOLOGY
+  • Dynamic parameter adjustment based on detected market
+    conditions
+  • Automatic optimization for trending, ranging, and volatile
+    market phases
+  • Currency pair-specific optimization with custom settings
+
+► SOPHISTICATED RISK MANAGEMENT
+  • Smart position sizing algorithm with percentage-based risk
+  • Daily loss protection to prevent excessive drawdowns
+  • Volatility-adjusted stop loss and take profit levels
+
+► OPTIMIZED EXIT STRATEGIES
+  • Advanced trailing stop algorithm to maximize winning trades
+  • Partial position closing to secure profits while allowing
+    for extended moves
+  • Dynamic take-profit targets based on current market phase
+
+► PERFORMANCE-FOCUSED DESIGN
+  • Comprehensive filtering system to avoid unfavorable
+    market conditions
+  • Multi-timeframe and multi-pair backtesting capabilities
+  • Detailed performance analytics for strategy refinement
+
+===============================================================
+                    SYSTEM REQUIREMENTS
+===============================================================
+
+• MetaTrader 5 Platform
+• Recommended Timeframe: M15 (also works on M5-H1)
+• Recommended Pairs: EURUSD, GBPUSD, USDJPY, AUDUSD
+• Minimum Deposit: $1,000 recommended
+• VPS Recommended for 24/7 operation
