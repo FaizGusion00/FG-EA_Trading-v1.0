@@ -5,8 +5,9 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, FGCompany Original Trading"
 #property link      "https://www.fgtrading.com"
-#property version   "1.00"
+#property version   "1.30"
 #property strict
+#property description "FG ScalpingPro EA - Backtesting Utility"
 
 // Required for multi-timeframe, multi-symbol testing
 #include <Arrays\ArrayString.mqh>
@@ -85,7 +86,7 @@ input double DailyLossPercent = 5.0;                                   // Daily 
 // Global variables
 string CurrentSymbol;
 ENUM_TIMEFRAMES CurrentTimeframe;
-FileTxt ReportFile;
+CFileTxt ReportFile;
 bool IsFileOpen = false;
 int TotalTestsRun = 0;
 int SuccessfulTests = 0;
@@ -179,6 +180,7 @@ int OnStart() {
    // Close report file if open
    if(IsFileOpen) {
       ReportFile.Close();
+      IsFileOpen = false;
    }
    
    return 0;
@@ -259,7 +261,7 @@ void RunMultiPairBacktest() {
    
    // Loop through each symbol
    for(int i = 0; i < symbolCount; i++) {
-      string symbol = StringTrimLeft(StringTrimRight(symbols[i]));
+      string symbol = StringTrim(symbols[i]);
       
       // Check if symbol exists
       if(!SymbolSelect(symbol, true)) {
@@ -293,7 +295,7 @@ void RunMultiTimeframeBacktest() {
    
    // Loop through each timeframe
    for(int i = 0; i < tfCount; i++) {
-      string tfStr = StringTrimLeft(StringTrimRight(timeframes[i]));
+      string tfStr = StringTrim(timeframes[i]);
       ENUM_TIMEFRAMES tf = StringToTimeframe(tfStr);
       
       if(tf == PERIOD_CURRENT) {
@@ -330,8 +332,11 @@ void RunSingleBacktest(string symbol, ENUM_TIMEFRAMES timeframe) {
       return;
    }
    
-   // Build the parameter string for the EA
-   string parameters = "RSI_Period=" + IntegerToString(RSI_Period) + ";" +
+   // Build the parameter string for the EA - updated to match the latest EA version
+   string parameters = "EnableTrading=" + BoolToString(EnableTrading) + ";" +
+                       "MagicNumber=" + IntegerToString(MagicNumber) + ";" +
+                       "MaxTrades=" + IntegerToString(MaxTrades) + ";" +
+                       "RSI_Period=" + IntegerToString(RSI_Period) + ";" +
                        "RSI_Overbought=" + IntegerToString(RSI_Overbought) + ";" +
                        "RSI_Oversold=" + IntegerToString(RSI_Oversold) + ";" +
                        "UseRSIFilter=" + BoolToString(UseRSIFilter) + ";" +
@@ -348,7 +353,10 @@ void RunSingleBacktest(string symbol, ENUM_TIMEFRAMES timeframe) {
                        "RiskPercent=" + DoubleToString(RiskPercent) + ";" +
                        "MaxLotSize=" + DoubleToString(MaxLotSize) + ";" +
                        "UseDailyLossLimit=" + BoolToString(UseDailyLossLimit) + ";" +
-                       "DailyLossPercent=" + DoubleToString(DailyLossPercent) + ";";
+                       "DailyLossPercent=" + DoubleToString(DailyLossPercent) + ";" +
+                       "StrictAnalysis=true;" +
+                       "EnableAlerts=false;" +
+                       "EnableDashboard=false;";
    
    // Set date range and deposit
    TesterSetDateFrom(StartDate);

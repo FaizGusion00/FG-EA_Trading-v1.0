@@ -761,7 +761,7 @@ int CalculateTradeProbability(ENUM_TRADE_SIGNAL signal) {
 void CreateDashboard() {
    // Get chart width to center the dashboard
    int chartWidth = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
-   int dashboardWidth = 180;  // Slightly smaller width
+   int dashboardWidth = 200;  // Slightly smaller width
    
    // Calculate center position
    int centerX = (chartWidth / 2) - (dashboardWidth / 2);

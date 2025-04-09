@@ -1,15 +1,17 @@
 //+------------------------------------------------------------------+
-//|                                     FG_ScalpingPro_Indicator.mq5 |
+//|                             FG_ScalpingPro_Indicator_FIXED.mq5 |
 //|                       Copyright 2025, FGCompany Original Trading |
 //|                                     Developed by Faiz Nasir      |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, FGCompany Original Trading"
 #property link      "https://www.fgtrading.com"
-#property version   "1.00"
-#property description "FG ScalpingPro Trading System Indicator"
+#property version   "1.01"
+#property description "FG ScalpingPro Trading System Indicator (Display Only)"
 #property indicator_chart_window
+#property indicator_separate_window 0
 #property indicator_buffers 19
 #property indicator_plots   14
+#property indicator_applied_price PRICE_CLOSE
 
 // Plot properties for Bollinger Bands
 #property indicator_label1  "BB Upper"
