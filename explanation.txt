@@ -1,0 +1,60 @@
+The EA is designed to perform automatic trading, as indicated by the input parameter EnableTrading, which is set to true by default. This parameter controls whether the EA can execute trades automatically. When EnableTrading is enabled:
+
+The EA continuously monitors market conditions on every tick via the OnTick() function.
+It generates trading signals (buy or sell) and, if certain conditions and filters are met, executes trades without manual intervention using the ExecuteTrade() function.
+It also manages open positions, including applying trailing stops and partial closes, further supporting its autonomous operation.
+Thus, as long as EnableTrading remains true and the EA is attached to a chart with sufficient permissions, it will auto-trade.
+
+On What Basis Does It Trade?
+The EA makes trading decisions based on a combination of technical indicators, market conditions, and predefined filters. Here’s a detailed breakdown:
+
+1. Trading Signal Generation
+The core trading logic resides in the GetTradeSignal() function, which determines whether to buy, sell, or do nothing (SIGNAL_BUY, SIGNAL_SELL, or SIGNAL_NONE). It uses the following indicators and conditions:
+
+Buy Signal Conditions:
+Exponential Moving Average (EMA) Crossover: The fast EMA (default period: 9) must be above the slow EMA (default period: 21), indicating a bullish trend.
+Price Position: The current closing price must be above the fast EMA.
+Recent EMA Interaction: Either the previous close (1 bar ago) or the close two bars ago was at or below the fast EMA, suggesting a recent crossover or price touching the EMA.
+Relative Strength Index (RSI) Momentum: The current RSI (default period: 14) must be higher than the previous RSI, showing upward momentum.
+RSI Oversold Check: The RSI one or two bars ago must have been below the oversold level (default: 30), indicating the market was recently oversold.
+Sell Signal Conditions:
+EMA Crossover: The fast EMA must be below the slow EMA, indicating a bearish trend.
+Price Position: The current closing price must be below the fast EMA.
+Recent EMA Interaction: Either the previous close or the close two bars ago was at or above the fast EMA, suggesting a recent crossover or touch.
+RSI Momentum: The current RSI must be lower than the previous RSI, showing downward momentum.
+RSI Overbought Check: The RSI one or two bars ago must have been above the overbought level (default: 70), indicating the market was recently overbought.
+These conditions combine trend analysis (via EMAs) with momentum and mean-reversion signals (via RSI) to identify high-probability entry points.
+
+2. Trade Filters
+Before executing a trade, the EA applies several filters in the CheckFilters() function to ensure favorable conditions:
+
+Volatility Filter: The Average True Range (ATR, default period: 14) must exceed a minimum value (default: 15 points). This ensures sufficient market movement.
+Volume Filter: If enabled (default: true), the current tick volume must be above the Simple Moving Average (SMA) of volume (default period: 20), confirming market activity.
+Time Filter: If enabled (default: true), trading is restricted to specified hours (default: 8–12 EST) and days (default: Monday–Friday), avoiding low-liquidity periods.
+News Filter: If enabled (default: true), trading pauses during high-impact news events (though the implementation is a placeholder and currently returns false).
+RSI Filter: If enabled (default: true), for buy signals, RSI must not be overbought (above 70); for sell signals, it must not be oversold (below 30).
+Daily Loss Limit: If enabled (default: true), trading stops if the daily loss exceeds a percentage of the account balance (default: 5%), protecting against excessive drawdowns.
+These filters refine the signals, aiming to increase the likelihood of successful trades by avoiding unfavorable conditions.
+
+3. Trade Execution
+Once a signal passes the filters, the ExecuteTrade() function:
+
+Calculates Lot Size: Either uses a fixed lot size (default: 0.01) or calculates it dynamically based on risk percentage (default: 1%) and stop loss distance.
+Sets Stop Loss (SL) and Take Profit (TP): Uses ATR-based distances (default multipliers: SL = 1.0, TP = 1.5), adjustable by market phase or pair-specific settings (e.g., EURUSD_Settings).
+Places Orders: Executes a buy or sell order with the calculated SL and TP, logging the trade and sending notifications if enabled.
+4. Position Management
+The EA actively manages open positions via the ManagePositions() function:
+
+Partial Close: If enabled (default: true), closes a percentage of the position (default: 50%) when a portion of the TP is reached (default: 50%).
+Trailing Stop: If enabled (default: true), adjusts the SL when profit reaches a portion of the TP (default: 50%), trailing it by a step (default: 5 points).
+5. Additional Features
+Market Phase Detection: Adjusts TP and SL multipliers based on whether the market is in an uptrend, downtrend, ranging, or volatile phase, enhancing adaptability.
+Dashboard: Displays real-time signal, market phase, trade probability, RSI, and ATR values, aiding monitoring.
+Summary
+Auto-Trading Capability: Yes, the EA can auto-trade when EnableTrading is true.
+Trading Basis: It trades based on:
+EMA crossovers and price position for trend direction.
+RSI momentum and levels for confirmation.
+Filters for volatility, volume, time, news, RSI, and risk management to ensure high-probability setups.
+Dynamic lot sizing, SL, TP, and position management for execution and risk control.
+This EA is a sophisticated scalping system designed to capitalize on short-term opportunities while managing risk through technical analysis and filtering mechanisms.
