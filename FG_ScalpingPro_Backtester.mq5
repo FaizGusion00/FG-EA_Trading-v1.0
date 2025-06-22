@@ -52,6 +52,21 @@ input string EASection = "===== EA Settings To Test =====";             // EA Se
 input bool   EnableTrading = true;                                     // Enable automatic trading
 input int    MagicNumber = 123456;                                     // Magic number
 input int    MaxTrades = 5;                                            // Maximum number of concurrent trades
+input bool   StrictAnalysis = true;                                    // Stricter entry conditions for higher win rate
+input string TradeComment = "FG_ScalpingPro";                          // Trade comment
+input int    MinTradeHoldingTime = 15;                               // Minimum trade holding time (minutes)
+input int    MaxTradeHoldingTime = 60;                               // Maximum trade holding time (minutes)
+
+// Bollinger Bands parameters
+input string BBSettings = "===== Bollinger Bands Settings =====";        // Bollinger Bands Settings
+input int    BB_Period = 20;                                          // Bollinger Bands period
+input double BB_Deviation = 2.5;                                      // Bollinger Bands deviation
+input int    BB_Shift = 0;                                            // Bollinger Bands shift
+
+// Moving Average parameters
+input string MASettings = "===== Moving Average Settings =====";        // Moving Average Settings  
+input int    EMA_Fast_Period = 9;                                     // Fast EMA period
+input int    EMA_Slow_Period = 21;                                    // Slow EMA period
 
 // RSI parameters
 input string RSISettings = "===== RSI Settings =====";                  // RSI Settings
@@ -65,7 +80,24 @@ input string ATRSettings = "===== ATR Settings =====";                  // ATR S
 input int    ATR_Period = 14;                                          // ATR period
 input double ATR_Multiplier_TP = 1.5;                                  // ATR multiplier for TP
 input double ATR_Multiplier_SL = 1.0;                                  // ATR multiplier for SL
+input int    ATR_MinValue = 15;                                        // Minimum ATR value in points to trade
 input bool   UseDynamicMultiplier = true;                              // Use dynamic ATR multipliers
+
+// Volume filter parameters
+input string VolumeSettings = "===== Volume Filter Settings =====";      // Volume Filter Settings
+input int    Volume_Period = 20;                                      // Volume SMA period
+input bool   EnableVolumeFilter = true;                               // Enable volume filter
+
+// Time filter parameters
+input string TimeSettings = "===== Time Filter Settings =====";         // Time Filter Settings
+input bool   EnableTimeFilter = true;                                // Enable time filter
+input int    StartHour = 8;                                          // Start hour (EST)
+input int    EndHour = 12;                                           // End hour (EST)
+input bool   MondayFilter = true;                                    // Trade on Monday
+input bool   TuesdayFilter = true;                                   // Trade on Tuesday
+input bool   WednesdayFilter = true;                                 // Trade on Wednesday
+input bool   ThursdayFilter = true;                                  // Trade on Thursday
+input bool   FridayFilter = true;                                    // Trade on Friday
 
 // Exit optimization parameters
 input string ExitSettings = "===== Exit Optimization =====";            // Exit Optimization
@@ -122,20 +154,20 @@ bool TesterSetDateTo(datetime to) { return true; }
 bool TesterSetDeposit(double deposit) { return true; }
 bool TesterSetLeverage(int leverage) { return true; }
 bool TesterRun(string ea_name, string parameters = "") { return true; }
-bool TesterGetStatistics(TesterStatistics &stats) {
+bool TesterGetStatistics(TesterStatistics &stat_result) {
    // Mock stats for compilation
-   stats.profit = 1000.0;
-   stats.gross_profit = 1500.0;
-   stats.gross_loss = -500.0;
-   stats.trades = 50;
-   stats.profit_trades = 35;
-   stats.loss_trades = 15;
-   stats.profit_factor = 3.0;
-   stats.recovery_factor = 2.0;
-   stats.expected_payoff = 20.0;
-   stats.sharpe_ratio = 1.5;
-   stats.max_drawdown = 300.0;
-   stats.max_drawdown_rel = 0.03;
+   stat_result.profit = 1000.0;
+   stat_result.gross_profit = 1500.0;
+   stat_result.gross_loss = -500.0;
+   stat_result.trades = 50;
+   stat_result.profit_trades = 35;
+   stat_result.loss_trades = 15;
+   stat_result.profit_factor = 3.0;
+   stat_result.recovery_factor = 2.0;
+   stat_result.expected_payoff = 20.0;
+   stat_result.sharpe_ratio = 1.5;
+   stat_result.max_drawdown = 300.0;
+   stat_result.max_drawdown_rel = 0.03;
    return true;
 }
 
@@ -261,7 +293,9 @@ void RunMultiPairBacktest() {
    
    // Loop through each symbol
    for(int i = 0; i < symbolCount; i++) {
-      string symbol = StringTrim(symbols[i]);
+      string symbol = symbols[i];
+      // Use our custom StringTrim function
+      symbol = StringTrim(symbol);
       
       // Check if symbol exists
       if(!SymbolSelect(symbol, true)) {
@@ -295,7 +329,9 @@ void RunMultiTimeframeBacktest() {
    
    // Loop through each timeframe
    for(int i = 0; i < tfCount; i++) {
-      string tfStr = StringTrim(timeframes[i]);
+      string tfStr = timeframes[i];
+      // Use our custom StringTrim function
+      tfStr = StringTrim(tfStr);
       ENUM_TIMEFRAMES tf = StringToTimeframe(tfStr);
       
       if(tf == PERIOD_CURRENT) {
@@ -335,26 +371,54 @@ void RunSingleBacktest(string symbol, ENUM_TIMEFRAMES timeframe) {
    // Build the parameter string for the EA - updated to match the latest EA version
    string parameters = "EnableTrading=" + BoolToString(EnableTrading) + ";" +
                        "MagicNumber=" + IntegerToString(MagicNumber) + ";" +
+                       "TradeComment=" + TradeComment + ";" +
                        "MaxTrades=" + IntegerToString(MaxTrades) + ";" +
+                       "StrictAnalysis=" + BoolToString(StrictAnalysis) + ";" +
+                       "MinTradeHoldingTime=" + IntegerToString(MinTradeHoldingTime) + ";" +
+                       "MaxTradeHoldingTime=" + IntegerToString(MaxTradeHoldingTime) + ";" +
+                       // Bollinger Bands parameters
+                       "BB_Period=" + IntegerToString(BB_Period) + ";" +
+                       "BB_Deviation=" + DoubleToString(BB_Deviation) + ";" +
+                       "BB_Shift=" + IntegerToString(BB_Shift) + ";" +
+                       // Moving Average parameters
+                       "EMA_Fast_Period=" + IntegerToString(EMA_Fast_Period) + ";" +
+                       "EMA_Slow_Period=" + IntegerToString(EMA_Slow_Period) + ";" +
+                       // RSI parameters
                        "RSI_Period=" + IntegerToString(RSI_Period) + ";" +
                        "RSI_Overbought=" + IntegerToString(RSI_Overbought) + ";" +
                        "RSI_Oversold=" + IntegerToString(RSI_Oversold) + ";" +
                        "UseRSIFilter=" + BoolToString(UseRSIFilter) + ";" +
+                       // ATR parameters
                        "ATR_Period=" + IntegerToString(ATR_Period) + ";" +
                        "ATR_Multiplier_TP=" + DoubleToString(ATR_Multiplier_TP) + ";" +
                        "ATR_Multiplier_SL=" + DoubleToString(ATR_Multiplier_SL) + ";" +
+                       "ATR_MinValue=" + IntegerToString(ATR_MinValue) + ";" +
                        "UseDynamicMultiplier=" + BoolToString(UseDynamicMultiplier) + ";" +
+                       // Volume filter parameters
+                       "Volume_Period=" + IntegerToString(Volume_Period) + ";" +
+                       "EnableVolumeFilter=" + BoolToString(EnableVolumeFilter) + ";" +
+                       // Time filter parameters
+                       "EnableTimeFilter=" + BoolToString(EnableTimeFilter) + ";" +
+                       "StartHour=" + IntegerToString(StartHour) + ";" +
+                       "EndHour=" + IntegerToString(EndHour) + ";" +
+                       "MondayFilter=" + BoolToString(MondayFilter) + ";" +
+                       "TuesdayFilter=" + BoolToString(TuesdayFilter) + ";" +
+                       "WednesdayFilter=" + BoolToString(WednesdayFilter) + ";" +
+                       "ThursdayFilter=" + BoolToString(ThursdayFilter) + ";" +
+                       "FridayFilter=" + BoolToString(FridayFilter) + ";" +
+                       // Exit optimization parameters
                        "UseTrailingStop=" + BoolToString(UseTrailingStop) + ";" +
                        "TrailingStart=" + DoubleToString(TrailingStart) + ";" +
                        "TrailingStep=" + DoubleToString(TrailingStep) + ";" +
                        "UsePartialClose=" + BoolToString(UsePartialClose) + ";" +
                        "PartialClosePercent=" + DoubleToString(PartialClosePercent) + ";" +
                        "PartialCloseAt=" + DoubleToString(PartialCloseAt) + ";" +
+                       // Risk management parameters
                        "RiskPercent=" + DoubleToString(RiskPercent) + ";" +
                        "MaxLotSize=" + DoubleToString(MaxLotSize) + ";" +
                        "UseDailyLossLimit=" + BoolToString(UseDailyLossLimit) + ";" +
                        "DailyLossPercent=" + DoubleToString(DailyLossPercent) + ";" +
-                       "StrictAnalysis=true;" +
+                       // Disable visual elements for backtesting
                        "EnableAlerts=false;" +
                        "EnableDashboard=false;";
    
@@ -386,8 +450,8 @@ void RunSingleBacktest(string symbol, ENUM_TIMEFRAMES timeframe) {
 //+------------------------------------------------------------------+
 void ProcessBacktestResults(string symbol, ENUM_TIMEFRAMES timeframe) {
    // Get tester statistics
-   TesterStatistics stats;
-   if(!TesterGetStatistics(stats)) {
+   TesterStatistics local_stats;
+   if(!TesterGetStatistics(local_stats)) {
       WriteLine("Error getting statistics");
       return;
    }
@@ -396,17 +460,17 @@ void ProcessBacktestResults(string symbol, ENUM_TIMEFRAMES timeframe) {
    BacktestResult result;
    result.Symbol = symbol;
    result.Timeframe = TimeframeToString(timeframe);
-   result.NetProfit = stats.profit;
-   result.GrossProfit = stats.gross_profit;
-   result.GrossLoss = stats.gross_loss;
-   result.TotalTrades = stats.trades;
-   result.WinningTrades = stats.profit_trades;
-   result.LosingTrades = stats.loss_trades;
-   result.ProfitFactor = stats.profit_factor;
-   result.MaxDrawdown = stats.max_drawdown;
+   result.NetProfit = local_stats.profit;
+   result.GrossProfit = local_stats.gross_profit;
+   result.GrossLoss = local_stats.gross_loss;
+   result.TotalTrades = local_stats.trades;
+   result.WinningTrades = local_stats.profit_trades;
+   result.LosingTrades = local_stats.loss_trades;
+   result.ProfitFactor = local_stats.profit_factor;
+   result.MaxDrawdown = local_stats.max_drawdown;
    result.WinRate = (result.TotalTrades > 0) ? (double)result.WinningTrades / result.TotalTrades * 100.0 : 0;
-   result.SharpeRatio = stats.sharpe_ratio;
-   result.ExpectedPayoff = stats.expected_payoff;
+   result.SharpeRatio = local_stats.sharpe_ratio;
+   result.ExpectedPayoff = local_stats.expected_payoff;
    
    // Add to results array
    int size = ArraySize(Results);
@@ -541,4 +605,11 @@ ENUM_TIMEFRAMES StringToTimeframe(string tf) {
 string BoolToString(bool value) {
    return value ? "true" : "false";
 }
-//+------------------------------------------------------------------+ 
+
+//+------------------------------------------------------------------+
+//| Custom StringTrim function                                       |
+//+------------------------------------------------------------------+
+string StringTrim(string text) {
+   return StringTrimRight(StringTrimLeft(text));
+}
+//+------------------------------------------------------------------+

@@ -5,12 +5,12 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, FGCompany Original Trading"
 #property link      "https://www.fgtrading.com"
-#property version   "1.01"
-#property description "FG ScalpingPro Trading System Indicator (Display Only)"
+#property version   "1.02"
+#property description "FG ScalpingPro Trading System Indicator (Enhanced)"
 #property indicator_chart_window
 #property indicator_separate_window 0
-#property indicator_buffers 19
-#property indicator_plots   14
+#property indicator_buffers 22  // Increased by 3 for new indicators
+#property indicator_plots   16  // Increased by 2 for new visual elements
 #property indicator_applied_price PRICE_CLOSE
 
 // Plot properties for Bollinger Bands
@@ -96,6 +96,19 @@
 #property indicator_type14   DRAW_HISTOGRAM
 #property indicator_color14  clrOrange
 #property indicator_width14  3
+
+// New input parameters for enhanced analysis
+input string EnhancedFiltersSection = "===== Enhanced Analysis Filters ====="; // Enhanced Filters
+input bool   UsePriceActionPatterns = true;     // Use price action patterns
+input bool   UseMarketStructure = true;         // Analyze market structure (HH/HL/LH/LL)
+input int    PatternLookback = 5;               // Bars to look back for patterns
+input bool   UseDynamicSR = true;               // Use dynamic S/R levels
+input bool   FilterByTradingSession = false;    // Filter by trading session
+input string AsianSessionHours = "00:00-08:00"; // Asian session hours (GMT)
+input string LondonSessionHours = "08:00-16:00"; // London session hours (GMT)
+input string NYSessionHours = "13:00-21:00";    // New York session hours (GMT)
+input bool   UseMACD = true;                    // Add MACD for trend confirmation
+input bool   UseStochastic = true;              // Add Stochastic for momentum
 
 // Input parameters
 input string GeneralSection = "===== Indicator Settings ====="; // General Settings
@@ -184,6 +197,11 @@ double ATR_Buffer[];
 long Volume_Buffer[];
 double BB_Width_Buffer[];
 
+// Additional buffers for enhanced indicators
+double MACD_Main_Buffer[];
+double Stochastic_Main_Buffer[];
+double MarketStructure_Buffer[];
+
 // Indicator handles
 int BB_Handle;
 int EMA_Fast_Handle;
@@ -193,6 +211,8 @@ int Fractal_Up_Handle;
 int Fractal_Down_Handle;
 int ADX_Handle;
 int RSI_Handle;
+int MACD_Handle;
+int Stochastic_Handle;
 
 // Support/Resistance levels
 struct SRLevel {
@@ -249,6 +269,28 @@ int RiskProbability = 50; // Default risk probability
 ENUM_MARKET_CONDITION CurrentMarketCondition = MARKET_NEUTRAL;
 string MarketConditionText = "NEUTRAL";
 
+// Structure for price action patterns
+struct PricePattern {
+   bool valid;
+   string pattern;
+   int strength;  // 1-10 where 10 is strongest
+   bool bullish;  // true for bullish, false for bearish
+};
+
+// Structure for market structure
+enum ENUM_MARKET_STRUCTURE {
+   STRUCTURE_UNKNOWN = 0,
+   STRUCTURE_UPTREND = 1,    // Higher highs, higher lows
+   STRUCTURE_DOWNTREND = 2,  // Lower highs, lower lows
+   STRUCTURE_REVERSAL_UP = 3, // Potential upward reversal
+   STRUCTURE_REVERSAL_DOWN = 4 // Potential downward reversal
+};
+
+ENUM_MARKET_STRUCTURE CurrentMarketStructure = STRUCTURE_UNKNOWN;
+PricePattern CurrentPattern;
+int MarketStrength = 0; // -100 to +100 scale
+bool ForceInactive = false; // Emergency filter if market conditions are too risky
+
 //+------------------------------------------------------------------+
 //| Custom indicator initialization function                          |
 //+------------------------------------------------------------------+
@@ -274,6 +316,11 @@ int OnInit() {
    SetIndexBuffer(17, RSI_Buffer, INDICATOR_CALCULATIONS);
    SetIndexBuffer(18, BB_Width_Buffer, INDICATOR_CALCULATIONS);
    
+   // Add new buffers for enhanced indicators
+   SetIndexBuffer(19, MACD_Main_Buffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(20, Stochastic_Main_Buffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(21, MarketStructure_Buffer, INDICATOR_CALCULATIONS);
+   
    // Set arrow codes for buy/sell signals and fractals
    PlotIndexSetInteger(5, PLOT_ARROW, 233); // Buy arrow
    PlotIndexSetInteger(6, PLOT_ARROW, 234); // Sell arrow
@@ -290,6 +337,23 @@ int OnInit() {
    ADX_Handle = iADX(_Symbol, PERIOD_CURRENT, 14); // ADX with default period of 14
    RSI_Handle = iRSI(_Symbol, PERIOD_CURRENT, RSI_Period, PRICE_CLOSE); // RSI handle
    
+   // Initialize new indicator handles
+   if(UseMACD) {
+      MACD_Handle = iMACD(_Symbol, PERIOD_CURRENT, 12, 26, 9, PRICE_CLOSE);
+      if(MACD_Handle == INVALID_HANDLE) {
+         Print("Error creating MACD indicator: ", GetLastError());
+         return(INIT_FAILED);
+      }
+   }
+   
+   if(UseStochastic) {
+      Stochastic_Handle = iStochastic(_Symbol, PERIOD_CURRENT, 14, 3, 3, MODE_SMA, STO_LOWHIGH);
+      if(Stochastic_Handle == INVALID_HANDLE) {
+         Print("Error creating Stochastic indicator: ", GetLastError());
+         return(INIT_FAILED);
+      }
+   }
+   
    // Check indicator handles
    if(BB_Handle == INVALID_HANDLE || 
       EMA_Fast_Handle == INVALID_HANDLE || 
@@ -298,7 +362,9 @@ int OnInit() {
       Fractal_Up_Handle == INVALID_HANDLE ||
       Fractal_Down_Handle == INVALID_HANDLE ||
       ADX_Handle == INVALID_HANDLE ||
-      RSI_Handle == INVALID_HANDLE) {
+      RSI_Handle == INVALID_HANDLE ||
+      MACD_Handle == INVALID_HANDLE ||
+      Stochastic_Handle == INVALID_HANDLE) {
       Print("Error creating indicator handles: ", GetLastError());
       return(INIT_FAILED);
    }
@@ -338,6 +404,10 @@ void OnDeinit(const int reason) {
    IndicatorRelease(Fractal_Down_Handle);
    IndicatorRelease(ADX_Handle);
    IndicatorRelease(RSI_Handle);
+   
+   // Release new indicator handles
+   if(UseMACD) IndicatorRelease(MACD_Handle);
+   if(UseStochastic) IndicatorRelease(Stochastic_Handle);
    
    // Remove dashboard objects
    ObjectsDeleteAll(0, ObjectPrefix);
@@ -412,6 +482,15 @@ int OnCalculate(const int rates_total,
    ArrayResize(adx_main, rates_total);
    if(CopyBuffer(ADX_Handle, 0, 0, rates_total, adx_main) <= 0) return(0);
    
+   // Copy additional indicators if enabled
+   if(UseMACD) {
+      if(CopyBuffer(MACD_Handle, 0, 0, rates_total, MACD_Main_Buffer) <= 0) return(0);
+   }
+   
+   if(UseStochastic) {
+      if(CopyBuffer(Stochastic_Handle, 0, 0, rates_total, Stochastic_Main_Buffer) <= 0) return(0);
+   }
+   
    // Copy volume data directly from function parameter
    for(int i = 0; i < rates_total; i++) {
       if(i < ArraySize(tick_volume)) {
@@ -422,9 +501,17 @@ int OnCalculate(const int rates_total,
    // Initialize signal changed flag
    SignalChanged = false;
    
+   // Reset current pattern
+   CurrentPattern.valid = false;
+   
    // Find support and resistance levels
    if(prev_calculated == 0 || rates_total % 50 == 0) { // Recalculate periodically to reduce CPU load
-      DetectSupportResistanceLevels(high, low, close, time, rates_total);
+      if(UseDynamicSR) {
+         DetectSupportResistanceLevels(high, low, close, time, rates_total);
+      } else {
+         // Use standard calculation for S/R levels
+         DetectSupportResistanceLevels(high, low, close, time, rates_total);
+      }
    }
    
    // Apply existing S/R levels to buffers
@@ -458,6 +545,16 @@ int OnCalculate(const int rates_total,
       // Calculate trend strength based on ADX
       if(i < ArraySize(adx_main)) {
          Trend_Strength_Buffer[i] = adx_main[i] / 10.0;
+      }
+      
+      // Detect market structure if enabled
+      if(UseMarketStructure && i > 10) {
+         DetectMarketStructure(high, low, i);
+      }
+      
+      // Detect price action patterns if enabled
+      if(UsePriceActionPatterns && i >= PatternLookback) {
+         DetectPriceActionPatterns(open, high, low, close, i, PatternLookback);
       }
    }
    
@@ -511,6 +608,12 @@ int OnCalculate(const int rates_total,
          }
       }
       
+      // Check trading session filter if enabled
+      bool session_ok = true;
+      if(FilterByTradingSession) {
+         session_ok = IsInActiveSession();
+      }
+      
       // Calculate trend strength
       double trend_strength = 0;
       if(EMA_Fast_Buffer[i] > EMA_Slow_Buffer[i]) {
@@ -527,6 +630,37 @@ int OnCalculate(const int rates_total,
       bool nearSupport = (distToSupport > 0 && distToSupport < 20 * _Point);
       bool nearResistance = (distToResistance > 0 && distToResistance < 20 * _Point);
       
+      // Check additional indicators if enabled
+      bool macd_ok = true;
+      if(UseMACD && i > 0) {
+         // For buy signals, MACD should be positive or crossing above zero
+         // For sell signals, MACD should be negative or crossing below zero
+         if(EMA_Fast_Buffer[i] > EMA_Slow_Buffer[i]) { // Bullish trend
+            macd_ok = MACD_Main_Buffer[i] > MACD_Main_Buffer[i-1] || MACD_Main_Buffer[i] > 0;
+         } else if(EMA_Fast_Buffer[i] < EMA_Slow_Buffer[i]) { // Bearish trend
+            macd_ok = MACD_Main_Buffer[i] < MACD_Main_Buffer[i-1] || MACD_Main_Buffer[i] < 0;
+         }
+      }
+      
+      bool stoch_ok = true;
+      if(UseStochastic) {
+         // For buy signals, Stochastic should be rising from oversold
+         // For sell signals, Stochastic should be falling from overbought
+         if(EMA_Fast_Buffer[i] > EMA_Slow_Buffer[i]) { // Bullish trend
+            stoch_ok = Stochastic_Main_Buffer[i] > Stochastic_Main_Buffer[i-1] ||
+                      (Stochastic_Main_Buffer[i] < 30 && Stochastic_Main_Buffer[i] > Stochastic_Main_Buffer[i-1]);
+         } else if(EMA_Fast_Buffer[i] < EMA_Slow_Buffer[i]) { // Bearish trend
+            stoch_ok = Stochastic_Main_Buffer[i] < Stochastic_Main_Buffer[i-1] ||
+                      (Stochastic_Main_Buffer[i] > 70 && Stochastic_Main_Buffer[i] < Stochastic_Main_Buffer[i-1]);
+         }
+      }
+      
+      // Check price action patterns if enabled
+      bool pattern_ok = !UsePriceActionPatterns || !CurrentPattern.valid || 
+                       (CurrentPattern.valid && 
+                        ((EMA_Fast_Buffer[i] > EMA_Slow_Buffer[i] && CurrentPattern.bullish) || 
+                         (EMA_Fast_Buffer[i] < EMA_Slow_Buffer[i] && !CurrentPattern.bullish)));
+      
       // Determine signal strength
       ENUM_SIGNAL_STRENGTH signal_strength = SIGNAL_NEUTRAL;
       
@@ -534,17 +668,53 @@ int OnCalculate(const int rates_total,
       // This ensures probability is always updated, not just on signals
       CalculateWinProbability(i, close[i], trend_strength, nearSupport, nearResistance, is_bb_squeeze, volume_ok, atr_ok, rsi_ok);
       
-      // Buy signal conditions
-      if(EMA_Fast_Buffer[i] > EMA_Slow_Buffer[i]) { // Bullish trend
-         if(close[i-1] <= EMA_Slow_Buffer[i-1] && close[i] > EMA_Slow_Buffer[i] && // Price bounce
-            is_bb_squeeze && // Bollinger squeeze
-            volume_ok && // Volume filter
-            atr_ok && // ATR filter
-            rsi_ok) { // RSI filter
+      // Calculate market condition (trend, volatility, etc.)
+      CalculateMarketCondition(i, close[i], trend_strength, nearSupport, nearResistance, is_bb_squeeze, adx_main[i], ATR_Buffer[i]);
+      
+      // Ensure we're not in emergency inactive mode
+      ForceInactive = (CurrentMarketCondition == MARKET_VOLATILE && ATR_Buffer[i] * _Point > ATR_MinValue * _Point * 3);
+      
+      // Buy signal conditions with enhanced filters
+      if(EMA_Fast_Buffer[i] > EMA_Slow_Buffer[i] && !ForceInactive) { // Bullish trend
+         // Check for enhanced buy conditions
+         bool enhancedBuySignal = false;
+         
+         // Standard buy signal conditions
+         bool basicBuyCondition = (close[i-1] <= EMA_Slow_Buffer[i-1] && close[i] > EMA_Slow_Buffer[i] && // Price bounce
+                                  is_bb_squeeze && // Bollinger squeeze
+                                  volume_ok && // Volume filter
+                                  atr_ok && // ATR filter
+                                  rsi_ok); // RSI filter
+         
+         // Add price action patterns
+         if(UsePriceActionPatterns && CurrentPattern.valid && CurrentPattern.bullish && CurrentPattern.strength >= 6) {
+            enhancedBuySignal = true;
+         }
+         
+         // Add market structure confirmation
+         if(UseMarketStructure && 
+            (CurrentMarketStructure == STRUCTURE_UPTREND || CurrentMarketStructure == STRUCTURE_REVERSAL_UP) &&
+            nearSupport) {
+            enhancedBuySignal = true;
+         }
+         
+         // Add combined indicator confirmation
+         if(macd_ok && stoch_ok && rsi_ok && volume_ok && session_ok && pattern_ok) {
+            enhancedBuySignal = true;
+         }
+         
+         // Final buy signal condition that combines all filters
+         if(basicBuyCondition || enhancedBuySignal) {
             Buy_Signal_Buffer[i] = low[i] - 5 * _Point; // Place arrow below candle
             
             // Strong buy conditions
             bool strongBuy = close[i] > BB_Upper_Buffer[i] && trend_strength > 20;
+            
+            // Upgrade to strong buy if all conditions align
+            if(enhancedBuySignal && basicBuyCondition && macd_ok && stoch_ok && 
+               session_ok && pattern_ok && WinProbability > 70) {
+               strongBuy = true;
+            }
             
             // Adjust signal based on S/R levels
             if(nearResistance) {
@@ -562,17 +732,47 @@ int OnCalculate(const int rates_total,
          }
       }
       
-      // Sell signal conditions
-      if(EMA_Fast_Buffer[i] < EMA_Slow_Buffer[i]) { // Bearish trend
-         if(close[i-1] >= EMA_Slow_Buffer[i-1] && close[i] < EMA_Slow_Buffer[i] && // Price rejection
-            is_bb_squeeze && // Bollinger squeeze
-            volume_ok && // Volume filter
-            atr_ok && // ATR filter
-            rsi_ok) { // RSI filter
+      // Sell signal conditions with enhanced filters
+      if(EMA_Fast_Buffer[i] < EMA_Slow_Buffer[i] && !ForceInactive) { // Bearish trend
+         // Check for enhanced sell conditions
+         bool enhancedSellSignal = false;
+         
+         // Standard sell signal conditions
+         bool basicSellCondition = (close[i-1] >= EMA_Slow_Buffer[i-1] && close[i] < EMA_Slow_Buffer[i] && // Price rejection
+                                   is_bb_squeeze && // Bollinger squeeze
+                                   volume_ok && // Volume filter
+                                   atr_ok && // ATR filter
+                                   rsi_ok); // RSI filter
+         
+         // Add price action patterns
+         if(UsePriceActionPatterns && CurrentPattern.valid && !CurrentPattern.bullish && CurrentPattern.strength >= 6) {
+            enhancedSellSignal = true;
+         }
+         
+         // Add market structure confirmation
+         if(UseMarketStructure && 
+            (CurrentMarketStructure == STRUCTURE_DOWNTREND || CurrentMarketStructure == STRUCTURE_REVERSAL_DOWN) &&
+            nearResistance) {
+            enhancedSellSignal = true;
+         }
+         
+         // Add combined indicator confirmation
+         if(macd_ok && stoch_ok && rsi_ok && volume_ok && session_ok && pattern_ok) {
+            enhancedSellSignal = true;
+         }
+         
+         // Final sell signal condition that combines all filters
+         if(basicSellCondition || enhancedSellSignal) {
             Sell_Signal_Buffer[i] = high[i] + 5 * _Point; // Place arrow above candle
             
             // Strong sell conditions
             bool strongSell = close[i] < BB_Lower_Buffer[i] && trend_strength < -20;
+            
+            // Upgrade to strong sell if all conditions align
+            if(enhancedSellSignal && basicSellCondition && macd_ok && stoch_ok && 
+               session_ok && pattern_ok && WinProbability > 70) {
+               strongSell = true;
+            }
             
             // Adjust signal based on S/R levels
             if(nearSupport) {
@@ -750,19 +950,82 @@ void CalculateWinProbability(int index, double price, double trend_strength, boo
       probability -= 5;
    }
    
-   // ADX strength check - get ADX from buffer
-   double adx = 0;
-   if(index < ArraySize(ADX_Buffer)) {
-      adx = ADX_Buffer[index];
+   // Use MACD for trend confirmation (if enabled)
+   if(UseMACD && index < ArraySize(MACD_Main_Buffer)) {
+      double macd = MACD_Main_Buffer[index];
+      double macd_prev = index > 0 ? MACD_Main_Buffer[index-1] : 0;
       
-      if(adx > 40) {
-         // Strong trend - higher probability
-         probability += 5;
+      // Bullish MACD crossover or rising MACD
+      if(macd > 0 && macd_prev < 0) {
+         probability += 7; // Strong bullish signal
       }
-      else if(adx < 20) {
-         // Weak trend - lower probability
-         probability -= 2;
+      // Bearish MACD crossover or falling MACD
+      else if(macd < 0 && macd_prev > 0) {
+         probability -= 7; // Strong bearish signal
       }
+      // MACD trending in same direction as price
+      else if((macd > 0 && EMA_Fast_Buffer[index] > EMA_Slow_Buffer[index]) ||
+              (macd < 0 && EMA_Fast_Buffer[index] < EMA_Slow_Buffer[index])) {
+         probability += 5; // Confirming trend
+      }
+   }
+   
+   // Use Stochastic for momentum (if enabled)
+   if(UseStochastic && index < ArraySize(Stochastic_Main_Buffer)) {
+      double stoch = Stochastic_Main_Buffer[index];
+      
+      // Stochastic overbought in bullish trend
+      if(stoch > 80 && EMA_Fast_Buffer[index] > EMA_Slow_Buffer[index]) {
+         probability -= 4; // Potential reversal (bearish)
+      }
+      // Stochastic oversold in bearish trend
+      else if(stoch < 20 && EMA_Fast_Buffer[index] < EMA_Slow_Buffer[index]) {
+         probability += 4; // Potential reversal (bullish)
+      }
+   }
+   
+   // Check market structure
+   if(UseMarketStructure) {
+      switch(CurrentMarketStructure) {
+         case STRUCTURE_UPTREND:
+            if(EMA_Fast_Buffer[index] > EMA_Slow_Buffer[index]) {
+               probability += 6; // Aligned with market structure
+            } else {
+               probability -= 8; // Counter-trend
+            }
+            break;
+         case STRUCTURE_DOWNTREND:
+            if(EMA_Fast_Buffer[index] < EMA_Slow_Buffer[index]) {
+               probability += 6; // Aligned with market structure
+            } else {
+               probability -= 8; // Counter-trend
+            }
+            break;
+         case STRUCTURE_REVERSAL_UP:
+            probability += 7; // Potential for upward momentum after reversal
+            break;
+         case STRUCTURE_REVERSAL_DOWN:
+            probability -= 7; // Potential for downward momentum after reversal
+            break;
+      }
+   }
+   
+   // Check for price action patterns
+   if(UsePriceActionPatterns && CurrentPattern.valid) {
+      int patternBonus = CurrentPattern.strength * (CurrentPattern.bullish ? 1 : -1);
+      probability += patternBonus;
+   }
+   
+   // Session filter if enabled
+   if(FilterByTradingSession) {
+      if(!IsInActiveSession()) {
+         probability -= 10; // Reduce probability if outside active sessions
+      }
+   }
+   
+   // Apply emergency filter
+   if(ForceInactive) {
+      probability = MathMin(probability, 30); // Cap probability at 30% in dangerous markets
    }
    
    // Ensure probability stays within bounds
@@ -771,62 +1034,244 @@ void CalculateWinProbability(int index, double price, double trend_strength, boo
 }
 
 //+------------------------------------------------------------------+
-//| Calculate market condition based on comprehensive analysis        |
+//| Check if current time is in an active trading session             |
 //+------------------------------------------------------------------+
-void CalculateMarketCondition(int index, double price, double trend_strength, bool nearSupport, 
-                             bool nearResistance, bool is_squeeze, double adx, double atr) {
-   // Get current trend direction
-   bool bullishTrend = EMA_Fast_Buffer[index] > EMA_Slow_Buffer[index];
-   bool bearishTrend = EMA_Fast_Buffer[index] < EMA_Slow_Buffer[index];
+bool IsInActiveSession() {
+   datetime currentTime = TimeCurrent();
+   MqlDateTime dt;
+   TimeToStruct(currentTime, dt);
    
-   // Default to neutral
-   CurrentMarketCondition = MARKET_NEUTRAL;
-   MarketConditionText = "NEUTRAL";
+   int currentHour = dt.hour;
+   int currentMinute = dt.min;
+   int currentTimeMinutes = currentHour * 60 + currentMinute;
    
-   // Check for ranging market
-   if(adx < 20 && MathAbs(trend_strength) < 10) {
-      CurrentMarketCondition = MARKET_RANGING;
-      MarketConditionText = "RANGING/CONSOLIDATING";
+   // Parse session times
+   int asianStart = ParseSessionTime(AsianSessionHours, true);
+   int asianEnd = ParseSessionTime(AsianSessionHours, false);
+   int londonStart = ParseSessionTime(LondonSessionHours, true);
+   int londonEnd = ParseSessionTime(LondonSessionHours, false);
+   int nyStart = ParseSessionTime(NYSessionHours, true);
+   int nyEnd = ParseSessionTime(NYSessionHours, false);
+   
+   // Check if in any session
+   bool inAsian = IsTimeInRange(currentTimeMinutes, asianStart, asianEnd);
+   bool inLondon = IsTimeInRange(currentTimeMinutes, londonStart, londonEnd);
+   bool inNY = IsTimeInRange(currentTimeMinutes, nyStart, nyEnd);
+   
+   return inAsian || inLondon || inNY;
+}
+
+//+------------------------------------------------------------------+
+//| Parse session time format HH:MM-HH:MM                             |
+//+------------------------------------------------------------------+
+int ParseSessionTime(string sessionTime, bool isStart) {
+   string parts[];
+   StringSplit(sessionTime, '-', parts);
+   
+   if(ArraySize(parts) < 2) return 0;
+   
+   string timeStr = isStart ? parts[0] : parts[1];
+   string hourMin[];
+   StringSplit(timeStr, ':', hourMin);
+   
+   if(ArraySize(hourMin) < 2) return 0;
+   
+   int hour = (int)StringToInteger(hourMin[0]);
+   int minute = (int)StringToInteger(hourMin[1]);
+   
+   return hour * 60 + minute;
+}
+
+//+------------------------------------------------------------------+
+//| Check if time (in minutes) is within range                        |
+//+------------------------------------------------------------------+
+bool IsTimeInRange(int currentMinutes, int startMinutes, int endMinutes) {
+   // Handle cases where session spans midnight
+   if(startMinutes > endMinutes) {
+      return currentMinutes >= startMinutes || currentMinutes <= endMinutes;
+   } else {
+      return currentMinutes >= startMinutes && currentMinutes <= endMinutes;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Detect market structure using Higher Highs, Lower Lows etc.       |
+//+------------------------------------------------------------------+
+void DetectMarketStructure(const double &high[], const double &low[], int index) {
+   if(index < 10) return; // Need sufficient history
+   
+   bool higherHigh = high[index] > high[ArrayMaximum(high, index-5, 5)];
+   bool lowerLow = low[index] < low[ArrayMinimum(low, index-5, 5)];
+   bool higherLow = low[index] > low[ArrayMinimum(low, index-5, 5)];
+   bool lowerHigh = high[index] < high[ArrayMaximum(high, index-5, 5)];
+   
+   // Check for trend continuation
+   if(higherHigh && higherLow) {
+      CurrentMarketStructure = STRUCTURE_UPTREND;
+      MarketStructure_Buffer[index] = 1.0; // Uptrend
+   }
+   else if(lowerLow && lowerHigh) {
+      CurrentMarketStructure = STRUCTURE_DOWNTREND;
+      MarketStructure_Buffer[index] = -1.0; // Downtrend
+   }
+   // Check for potential reversal
+   else if(lowerLow && higherHigh) {
+      CurrentMarketStructure = STRUCTURE_REVERSAL_UP;
+      MarketStructure_Buffer[index] = 0.5; // Potential upward reversal
+   }
+   else if(higherLow && lowerHigh) {
+      CurrentMarketStructure = STRUCTURE_REVERSAL_DOWN;
+      MarketStructure_Buffer[index] = -0.5; // Potential downward reversal
+   }
+   else {
+      // No clear structure - use previous value
+      MarketStructure_Buffer[index] = index > 0 ? MarketStructure_Buffer[index-1] : 0;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Detect price action patterns                                      |
+//+------------------------------------------------------------------+
+void DetectPriceActionPatterns(const double &open[], const double &high[], 
+                              const double &low[], const double &close[], 
+                              int index, int lookback) {
+   // Reset pattern
+   CurrentPattern.valid = false;
+   
+   if(index < lookback) return;
+   
+   // Get recent bars
+   double bodySize = MathAbs(close[index] - open[index]);
+   double range = high[index] - low[index];
+   double upperWick = high[index] - MathMax(open[index], close[index]);
+   double lowerWick = MathMin(open[index], close[index]) - low[index];
+   
+   // Check for doji (indecision)
+   if(bodySize < range * 0.1) {
+      CurrentPattern.valid = true;
+      CurrentPattern.pattern = "Doji";
+      CurrentPattern.strength = 3;
+      CurrentPattern.bullish = false; // neutral
       return;
    }
    
-   // Check for volatility
-   if(atr * _Point > ATR_MinValue * _Point * 2) {
-      CurrentMarketCondition = MARKET_VOLATILE;
-      MarketConditionText = "VOLATILE/UNSTABLE";
-      
-      // Check for potential breakout conditions
-      if(is_squeeze && adx > 25) {
-         CurrentMarketCondition = MARKET_BREAKOUT;
-         MarketConditionText = "POTENTIAL BREAKOUT";
+   // Check for hammer (bullish reversal)
+   if(lowerWick > bodySize * 2 && upperWick < bodySize * 0.5) {
+      if(close[index] > open[index]) { // Green hammer
+         CurrentPattern.valid = true;
+         CurrentPattern.pattern = "Hammer";
+         CurrentPattern.strength = 7; 
+         CurrentPattern.bullish = true;
          return;
       }
    }
    
-   // Check for potential reversal patterns
-   if((bullishTrend && RSI_Buffer[index] < 40 && RSI_Buffer[index] > RSI_Buffer[index-1] && nearSupport) ||
-      (bearishTrend && RSI_Buffer[index] > 60 && RSI_Buffer[index] < RSI_Buffer[index-1] && nearResistance)) {
-      CurrentMarketCondition = MARKET_REVERSAL;
-      MarketConditionText = "POTENTIAL REVERSAL";
-      return;
+   // Check for shooting star (bearish reversal)
+   if(upperWick > bodySize * 2 && lowerWick < bodySize * 0.5) {
+      if(close[index] < open[index]) { // Red shooting star
+         CurrentPattern.valid = true;
+         CurrentPattern.pattern = "Shooting Star";
+         CurrentPattern.strength = 7;
+         CurrentPattern.bullish = false;
+         return;
+      }
    }
    
-   // Strong trends
-   if(bullishTrend) {
-      if(trend_strength > 20 && adx > 30 && RSI_Buffer[index] > 50) {
-         CurrentMarketCondition = MARKET_STRONGLY_BULLISH;
-         MarketConditionText = "STRONGLY BULLISH";
-      } else {
-         CurrentMarketCondition = MARKET_BULLISH;
-         MarketConditionText = "BULLISH";
+   // Check for engulfing patterns
+   if(index > 0) {
+      double prevBodySize = MathAbs(close[index-1] - open[index-1]);
+      
+      // Bullish engulfing
+      if(close[index] > open[index] && // Current bar is bullish
+         close[index-1] < open[index-1] && // Previous bar is bearish
+         open[index] < close[index-1] && // Current open below previous close
+         close[index] > open[index-1]) { // Current close above previous open
+         
+         CurrentPattern.valid = true;
+         CurrentPattern.pattern = "Bullish Engulfing";
+         CurrentPattern.strength = 8;
+         CurrentPattern.bullish = true;
+         return;
       }
-   } else if(bearishTrend) {
-      if(trend_strength < -20 && adx > 30 && RSI_Buffer[index] < 50) {
-         CurrentMarketCondition = MARKET_STRONGLY_BEARISH;
-         MarketConditionText = "STRONGLY BEARISH";
-      } else {
-         CurrentMarketCondition = MARKET_BEARISH;
-         MarketConditionText = "BEARISH";
+      
+      // Bearish engulfing
+      if(close[index] < open[index] && // Current bar is bearish
+         close[index-1] > open[index-1] && // Previous bar is bullish
+         open[index] > close[index-1] && // Current open above previous close
+         close[index] < open[index-1]) { // Current close below previous open
+         
+         CurrentPattern.valid = true;
+         CurrentPattern.pattern = "Bearish Engulfing";
+         CurrentPattern.strength = 8;
+         CurrentPattern.bullish = false;
+         return;
+      }
+   }
+   
+   // Check for three white soldiers (strong bullish trend)
+   if(index >= 2) {
+      if(close[index] > open[index] && 
+         close[index-1] > open[index-1] && 
+         close[index-2] > open[index-2] && 
+         close[index] > close[index-1] && 
+         close[index-1] > close[index-2]) {
+         
+         CurrentPattern.valid = true;
+         CurrentPattern.pattern = "Three White Soldiers";
+         CurrentPattern.strength = 9;
+         CurrentPattern.bullish = true;
+         return;
+      }
+   }
+   
+   // Check for three black crows (strong bearish trend)
+   if(index >= 2) {
+      if(close[index] < open[index] && 
+         close[index-1] < open[index-1] && 
+         close[index-2] < open[index-2] && 
+         close[index] < close[index-1] && 
+         close[index-1] < close[index-2]) {
+         
+         CurrentPattern.valid = true;
+         CurrentPattern.pattern = "Three Black Crows";
+         CurrentPattern.strength = 9;
+         CurrentPattern.bullish = false;
+         return;
+      }
+   }
+   
+   // Check for inside bar (consolidation)
+   if(index > 0) {
+      if(high[index] < high[index-1] && low[index] > low[index-1]) {
+         CurrentPattern.valid = true;
+         CurrentPattern.pattern = "Inside Bar";
+         CurrentPattern.strength = 4;
+         CurrentPattern.bullish = (close[index] > open[index]); // Direction based on close
+         return;
+      }
+   }
+   
+   // Check for pin bar (reversal)
+   double totalLength = high[index] - low[index];
+   if(totalLength > 0) {
+      double bodyRatio = bodySize / totalLength;
+      
+      // Pin bar has small body and long wick on one side
+      if(bodyRatio < 0.3) {
+         if(upperWick > totalLength * 0.6) {
+            CurrentPattern.valid = true;
+            CurrentPattern.pattern = "Bearish Pin Bar";
+            CurrentPattern.strength = 6;
+            CurrentPattern.bullish = false;
+            return;
+         }
+         else if(lowerWick > totalLength * 0.6) {
+            CurrentPattern.valid = true;
+            CurrentPattern.pattern = "Bullish Pin Bar";
+            CurrentPattern.strength = 6;
+            CurrentPattern.bullish = true;
+            return;
+         }
       }
    }
 }
@@ -1751,4 +2196,129 @@ bool IsFractalDown(const double &low[], int index, int period) {
    return true;
 }
 
-//+------------------------------------------------------------------+ 
+//+------------------------------------------------------------------+
+//| Calculate market condition based on comprehensive analysis        |
+//+------------------------------------------------------------------+
+void CalculateMarketCondition(int index, double price, double trend_strength, bool nearSupport, 
+                             bool nearResistance, bool is_squeeze, double adx, double atr) {
+   // Get current trend direction
+   bool bullishTrend = EMA_Fast_Buffer[index] > EMA_Slow_Buffer[index];
+   bool bearishTrend = EMA_Fast_Buffer[index] < EMA_Slow_Buffer[index];
+   
+   // Default to neutral
+   CurrentMarketCondition = MARKET_NEUTRAL;
+   MarketConditionText = "NEUTRAL";
+   
+   // Check for ranging market
+   if(adx < 20 && MathAbs(trend_strength) < 10) {
+      CurrentMarketCondition = MARKET_RANGING;
+      MarketConditionText = "RANGING/CONSOLIDATING";
+      return;
+   }
+   
+   // Check for volatility
+   if(atr * _Point > ATR_MinValue * _Point * 2) {
+      CurrentMarketCondition = MARKET_VOLATILE;
+      MarketConditionText = "VOLATILE/UNSTABLE";
+      
+      // Check for potential breakout conditions
+      if(is_squeeze && adx > 25) {
+         CurrentMarketCondition = MARKET_BREAKOUT;
+         MarketConditionText = "POTENTIAL BREAKOUT";
+         return;
+      }
+   }
+   
+   // Check for potential reversal patterns
+   if((bullishTrend && RSI_Buffer[index] < 40 && RSI_Buffer[index] > RSI_Buffer[index-1] && nearSupport) ||
+      (bearishTrend && RSI_Buffer[index] > 60 && RSI_Buffer[index] < RSI_Buffer[index-1] && nearResistance)) {
+      CurrentMarketCondition = MARKET_REVERSAL;
+      MarketConditionText = "POTENTIAL REVERSAL";
+      return;
+   }
+   
+   // Consider price action patterns if available
+   if(UsePriceActionPatterns && CurrentPattern.valid) {
+      if(CurrentPattern.bullish && CurrentPattern.strength >= 7) {
+         // Strong bullish pattern might indicate a potential reversal or trend acceleration
+         if(bearishTrend) {
+            CurrentMarketCondition = MARKET_REVERSAL;
+            MarketConditionText = "BULLISH REVERSAL PATTERN";
+            return;
+         }
+      }
+      else if(!CurrentPattern.bullish && CurrentPattern.strength >= 7) {
+         // Strong bearish pattern might indicate a potential reversal or trend acceleration
+         if(bullishTrend) {
+            CurrentMarketCondition = MARKET_REVERSAL;
+            MarketConditionText = "BEARISH REVERSAL PATTERN";
+            return;
+         }
+      }
+   }
+   
+   // Consider market structure if available
+   if(UseMarketStructure) {
+      switch(CurrentMarketStructure) {
+         case STRUCTURE_UPTREND:
+            if(bullishTrend) {
+               CurrentMarketCondition = MARKET_STRONGLY_BULLISH;
+               MarketConditionText = "STRONGLY BULLISH";
+               return;
+            }
+            break;
+         case STRUCTURE_DOWNTREND:
+            if(bearishTrend) {
+               CurrentMarketCondition = MARKET_STRONGLY_BEARISH;
+               MarketConditionText = "STRONGLY BEARISH";
+               return;
+            }
+            break;
+         case STRUCTURE_REVERSAL_UP:
+            CurrentMarketCondition = MARKET_REVERSAL;
+            MarketConditionText = "BULLISH REVERSAL STRUCTURE";
+            return;
+         case STRUCTURE_REVERSAL_DOWN:
+            CurrentMarketCondition = MARKET_REVERSAL;
+            MarketConditionText = "BEARISH REVERSAL STRUCTURE";
+            return;
+      }
+   }
+   
+   // Strong trends based on standard indicators
+   if(bullishTrend) {
+      if(trend_strength > 20 && adx > 30 && RSI_Buffer[index] > 50) {
+         CurrentMarketCondition = MARKET_STRONGLY_BULLISH;
+         MarketConditionText = "STRONGLY BULLISH";
+      } else {
+         CurrentMarketCondition = MARKET_BULLISH;
+         MarketConditionText = "BULLISH";
+      }
+   } else if(bearishTrend) {
+      if(trend_strength < -20 && adx > 30 && RSI_Buffer[index] < 50) {
+         CurrentMarketCondition = MARKET_STRONGLY_BEARISH;
+         MarketConditionText = "STRONGLY BEARISH";
+      } else {
+         CurrentMarketCondition = MARKET_BEARISH;
+         MarketConditionText = "BEARISH";
+      }
+   }
+   
+   // Additional MACD and Stochastic considerations if enabled
+   if(UseMACD && UseStochastic) {
+      // Both MACD and Stochastic confirm strong bullish trend
+      if(bullishTrend && MACD_Main_Buffer[index] > 0 && MACD_Main_Buffer[index] > MACD_Main_Buffer[index-1] &&
+         Stochastic_Main_Buffer[index] > 50 && Stochastic_Main_Buffer[index] > Stochastic_Main_Buffer[index-1]) {
+         CurrentMarketCondition = MARKET_STRONGLY_BULLISH;
+         MarketConditionText = "STRONGLY BULLISH - CONFIRMED";
+      }
+      // Both MACD and Stochastic confirm strong bearish trend
+      else if(bearishTrend && MACD_Main_Buffer[index] < 0 && MACD_Main_Buffer[index] < MACD_Main_Buffer[index-1] &&
+              Stochastic_Main_Buffer[index] < 50 && Stochastic_Main_Buffer[index] < Stochastic_Main_Buffer[index-1]) {
+         CurrentMarketCondition = MARKET_STRONGLY_BEARISH;
+         MarketConditionText = "STRONGLY BEARISH - CONFIRMED";
+      }
+   }
+}
+
+// ... rest of the code ... 

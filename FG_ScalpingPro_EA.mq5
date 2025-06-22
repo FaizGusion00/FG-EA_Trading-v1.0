@@ -120,6 +120,7 @@ input string EURUSD_Settings = "TP:15, ATR:1.5"; // EURUSD settings
 input string GBPUSD_Settings = "TP:20, ATR:1.3"; // GBPUSD settings
 input string USDJPY_Settings = "TP:18, ATR:1.2"; // USDJPY settings
 input string AUDUSD_Settings = "TP:16, ATR:1.4"; // AUDUSD settings
+input string ALL_Settings = "TP:18, ATR:1.5";  // General or All Currencies settings
 
 // Global variables
 CTrade Trade;                                     // Trading object
@@ -181,6 +182,29 @@ enum ENUM_MARKET_PHASE {
 ENUM_MARKET_PHASE CurrentMarketPhase = PHASE_UNKNOWN;
 
 //+------------------------------------------------------------------+
+//| Create a variable to track signal timing                           |
+//+------------------------------------------------------------------+
+datetime LastSignalCheckTime = 0;
+datetime LastSignalFoundTime = 0;
+int NoSignalCounter = 0;
+
+//+------------------------------------------------------------------+
+//| Calculate time for next day's start (midnight)                    |
+//+------------------------------------------------------------------+
+datetime GetNextDayStartTime() {
+   MqlDateTime current_time;
+   TimeToStruct(TimeCurrent(), current_time);
+   
+   // Reset to beginning of next day (midnight)
+   current_time.hour = 0;
+   current_time.min = 0;
+   current_time.sec = 0;
+   
+   // Add one day
+   return StructToTime(current_time) + 86400; // 86400 seconds = 24 hours
+}
+
+//+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit() {
@@ -200,11 +224,14 @@ int OnInit() {
    if(BB_Handle == INVALID_HANDLE || EMA_Fast_Handle == INVALID_HANDLE || 
       EMA_Slow_Handle == INVALID_HANDLE || ATR_Handle == INVALID_HANDLE ||
       RSI_Handle == INVALID_HANDLE) {
-      Print("Error creating indicators: ", GetLastError());
+      Print("ERROR: Failed to create indicator handles!");
       return INIT_FAILED;
    }
    
-   // Initialize arrays for indicator data
+   // Verify auto trading permissions on initialization
+   CheckAutoTradingPermissions();
+
+   // Initialize arrays
    ArraySetAsSeries(BB_Upper, true);
    ArraySetAsSeries(BB_Middle, true);
    ArraySetAsSeries(BB_Lower, true);
@@ -215,24 +242,24 @@ int OnInit() {
    ArraySetAsSeries(Volume_Buffer, true);
    ArraySetAsSeries(Close, true);
    
-   // Initialize active trades array
-   ArrayResize(ActiveTrades, 0);
-   
-   // Initialize balance tracking
+   // Initial account balance for risk calculation
    InitialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-   ResetDailyStats();
    
-   // Load existing positions
-   LoadExistingPositions();
+   // Initialize daily stats tracking
+   DailyStartBalance = InitialBalance;
+   DailyResetTime = GetNextDayStartTime();
    
-   // Create dashboard if enabled
+   // Set up dashboard if enabled
    if(EnableDashboard) {
       CreateDashboard();
    }
    
+   // Load active positions on startup
+   LoadExistingPositions();
+   
    Print("FG ScalpingPro EA v1.30 initialized successfully");
    
-   return(INIT_SUCCEEDED);
+   return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
@@ -259,7 +286,15 @@ void OnDeinit(const int reason) {
 //+------------------------------------------------------------------+
 void OnTick() {
    // Skip if automatic trading is disabled
-   if(!EnableTrading) return;
+   if(!EnableTrading) {
+      static datetime lastWarningTime = 0;
+      // Only show warning once per hour to avoid log spam
+      if(TimeCurrent() - lastWarningTime > 3600) {
+      Print("WARNING: Trading is disabled. Set EnableTrading=true in the inputs to allow auto-trading.");
+         lastWarningTime = TimeCurrent();
+      }
+      return;
+   }
    
    // Update indicator data - add detailed error checking
    if(!UpdateIndicators()) {
@@ -271,6 +306,9 @@ void OnTick() {
       return;
    }
    
+   // Always calculate market phase on each tick for real-time updates
+   DetectMarketPhase();
+   
    // Update and manage existing positions first
    UpdateActiveTrades();
    ManagePositions();
@@ -278,16 +316,29 @@ void OnTick() {
    // Check for new signals and calculate probability on EVERY tick
    ENUM_TRADE_SIGNAL newSignal = GetTradeSignal();
    
+   // If we get a valid signal, record it for monitoring
+   if(newSignal != SIGNAL_NONE) {
+      RecordSignalFound();
+   }
+   
+   // Monitor for prolonged periods without signals
+   MonitorSignalGeneration();
+   
    // Always calculate probability on each tick for real-time updates
    CurrentProbability = CalculateTradeProbability(newSignal);
    
-   // Debug print to verify calculation
-   Print("DEBUG: Current Probability = ", CurrentProbability, 
-         "%, Signal = ", SignalToString(newSignal), 
+   // Detailed market status log - print every 100 ticks to avoid excessive logging
+   static int tickCounter = 0;
+   if(tickCounter % 100 == 0) {
+      Print("MARKET STATUS: Signal = ", SignalToString(newSignal), 
+            ", Probability = ", CurrentProbability, "%", 
+            ", Phase = ", MarketPhaseToString(CurrentMarketPhase),
          ", RSI = ", DoubleToString(RSI_Buffer[0], 1),
-         ", ATR = ", DoubleToString(ATR_Buffer[0], 5),
-         ", EMA_Fast = ", DoubleToString(EMA_Fast[0], 5),
-         ", EMA_Slow = ", DoubleToString(EMA_Slow[0], 5));
+            ", ATR = ", DoubleToString(ATR_Buffer[0] * _Point, 1),
+            ", Fast EMA = ", DoubleToString(EMA_Fast[0], _Digits),
+            ", Slow EMA = ", DoubleToString(EMA_Slow[0], _Digits));
+   }
+   tickCounter++;
    
    // If signal changed, reset the timer
    if(newSignal != CurrentSignal) {
@@ -305,8 +356,9 @@ void OnTick() {
       UpdateDashboard();
    }
    
-   // Send pre-trade alert if probability is high
-   if(CurrentSignal != SIGNAL_NONE && CurrentProbability >= PreTradeAlertThreshold) {
+   // Lowered threshold - send pre-trade alert if probability is decent
+   // Changed from 70% to 60% to be more responsive
+   if(CurrentSignal != SIGNAL_NONE && CurrentProbability >= 60) {
       // Only alert once every 5 minutes for the same signal
       if(TimeCurrent() - LastAlertTime > 300) {
          SendPreTradeAlert();
@@ -314,13 +366,56 @@ void OnTick() {
       }
    }
    
+   // *** IMPORTANT: Full trading permission check ***
+   bool canTrade = true;
+   
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) {
+      Print("ERROR: Trading is not allowed in the terminal. Enable AutoTrading in MT5.");
+      canTrade = false;
+   }
+   
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) {
+      Print("ERROR: EA is not allowed to trade. Check 'Allow live trading' in EA settings.");
+      canTrade = false;
+   }
+   
+   if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED)) {
+      Print("ERROR: Trading is not allowed for this account. Check with your broker.");
+      canTrade = false;
+   }
+   
+   if(!canTrade) {
+      // Show continuous warning about trading permissions
+      static datetime lastPermissionWarningTime = 0;
+      if(TimeCurrent() - lastPermissionWarningTime > 300) { // Every 5 minutes
+         CheckAutoTradingPermissions(); // Detailed check with Alert
+         lastPermissionWarningTime = TimeCurrent();
+      }
+      return; // Exit if we can't trade
+   }
+   
    // Check if we can open new trades
    int currentTrades = ArraySize(ActiveTrades);
    if(currentTrades < MaxTrades) {
-      // Execute trades based on signals if they pass filters
-      if(CurrentSignal != SIGNAL_NONE && CheckFilters()) {
+      // LOWERED THRESHOLD - Execute trades at 60% probability (was previously higher)
+      // This makes the EA more responsive while still maintaining good risk management
+      if(CurrentSignal != SIGNAL_NONE && CurrentProbability >= 60 && CheckFilters()) {
+         Print("EXECUTING TRADE: ", SignalToString(CurrentSignal), 
+               ", Probability: ", CurrentProbability, 
+               "%, Market Phase: ", MarketPhaseToString(CurrentMarketPhase));
          ExecuteTrade(CurrentSignal);
       }
+      else if(CurrentSignal != SIGNAL_NONE && CurrentProbability > 0) {
+         // Log why we're not trading despite having a signal
+         static datetime lastLogTime = 0;
+         if(TimeCurrent() - lastLogTime > 60) { // Log no more than once per minute
+            Print("Trade signal detected but not executing because: ",
+                  CurrentProbability < 60 ? "Probability too low (" + IntegerToString(CurrentProbability) + "% < 60%)" : "Failed filters check");
+            lastLogTime = TimeCurrent();
+         }
+      }
+   } else if(currentTrades >= MaxTrades) {
+      Print("Maximum number of trades (" + IntegerToString(MaxTrades) + ") already open. Not opening new positions.");
    }
 }
 
@@ -483,43 +578,114 @@ bool UpdateIndicators() {
 }
 
 //+------------------------------------------------------------------+
-//| Detect current market phase                                      |
+//| Detect current market phase                                       |
 //+------------------------------------------------------------------+
 void DetectMarketPhase() {
-   // Get Bollinger Band width (volatility indicator)
-   double bbWidth = (BB_Upper[0] - BB_Lower[0]) / BB_Middle[0];
+   // This function determines if the market is in an uptrend, downtrend, ranging or volatile phase
    
-   // Calculate trend strength with direction
-   double trendStrength = (EMA_Fast[0] - EMA_Slow[0]) / ATR_Buffer[0];
+   // Previous market phase for logging
+   ENUM_MARKET_PHASE prevPhase = CurrentMarketPhase;
    
-   // Get ATR change to detect volatility changes
-   double atrChange = (ATR_Buffer[0] - ATR_Buffer[2]) / ATR_Buffer[2];
+   // Calculate EMA separation relative to ATR
+   double emaSeparation = MathAbs(EMA_Fast[0] - EMA_Slow[0]) / ATR_Buffer[0];
    
-   // Determine market phase
-   if(MathAbs(trendStrength) > 0.5) {
-      if(trendStrength > 0) {
-         CurrentMarketPhase = PHASE_UPTREND;  // Positive trend strength = uptrend
-      } else {
-         CurrentMarketPhase = PHASE_DOWNTREND; // Negative trend strength = downtrend
+   // Calculate BB width relative to price
+   double bbWidth = (BB_Upper[0] - BB_Lower[0]) / BB_Middle[0] * 100;
+   
+   // Calculate ADX strength (use 14 as default period if needed)
+   double adxValue = 0;
+   double plusDI = 0;
+   double minusDI = 0;
+   
+   // Use custom ADX calculations
+   int adx_handle = iADX(_Symbol, PERIOD_CURRENT, 14);
+   if(adx_handle != INVALID_HANDLE) {
+      double adx_buffer[];
+      double plusdi_buffer[];
+      double minusdi_buffer[];
+      
+      ArraySetAsSeries(adx_buffer, true);
+      ArraySetAsSeries(plusdi_buffer, true);
+      ArraySetAsSeries(minusdi_buffer, true);
+      
+      CopyBuffer(adx_handle, 0, 0, 3, adx_buffer);
+      CopyBuffer(adx_handle, 1, 0, 3, plusdi_buffer);
+      CopyBuffer(adx_handle, 2, 0, 3, minusdi_buffer);
+      
+      adxValue = adx_buffer[0];
+      plusDI = plusdi_buffer[0];
+      minusDI = minusdi_buffer[0];
+      
+      IndicatorRelease(adx_handle);
+   }
+   
+   // Check ATR rate of change
+   double atrChange = 0;
+   if(ATR_Buffer[1] > 0) {
+      atrChange = (ATR_Buffer[0] - ATR_Buffer[1]) / ATR_Buffer[1] * 100;
+   }
+   
+   // Check price trend (multiple candles)
+   int bullishCandles = 0;
+   int bearishCandles = 0;
+   
+   double prices[];
+   ArraySetAsSeries(prices, true);
+   if(CopyClose(_Symbol, PERIOD_CURRENT, 0, 10, prices) > 0) {
+      // Count consecutive bullish/bearish candles
+      for(int i = 1; i < 10; i++) {
+         if(prices[i-1] > prices[i]) bullishCandles++;
+         else if(prices[i-1] < prices[i]) bearishCandles++;
       }
    }
-   else if(bbWidth < 0.015) {
-      CurrentMarketPhase = PHASE_RANGING;
-   }
-   else if(atrChange > 0.2) {
-      CurrentMarketPhase = PHASE_VOLATILE;
-   }
-   else {
-      CurrentMarketPhase = PHASE_UNKNOWN;
-   }
    
-   // Debug output to verify market phase detection
-   Print("DEBUG: Market Phase Detection - EMA_Fast:", EMA_Fast[0], 
-         " EMA_Slow:", EMA_Slow[0], 
-         " TrendStrength:", trendStrength, 
-         " BBWidth:", bbWidth, 
-         " ATRChange:", atrChange, 
-         " Phase:", MarketPhaseToString(CurrentMarketPhase));
+   // More sensitive uptrend detection
+   if((EMA_Fast[0] > EMA_Slow[0] && emaSeparation > 0.25) || // Less separation required
+      (plusDI > minusDI && adxValue > 20) ||                // Lower ADX threshold
+      (bullishCandles >= 6)) {                              // 6 out of 9 candles bullish
+      
+      if(adxValue > 25 || emaSeparation > 0.5) {
+         // Strong uptrend
+         CurrentMarketPhase = PHASE_UPTREND;
+         if(prevPhase != PHASE_UPTREND)
+            Print("Market phase changed to UPTREND (Strong): ADX = ", adxValue, 
+                  ", EMA Separation = ", emaSeparation, 
+                  ", Bullish Candles = ", bullishCandles);
+      } else {
+         // Moderate uptrend still counts as uptrend
+         CurrentMarketPhase = PHASE_UPTREND;
+         if(prevPhase != PHASE_UPTREND)
+            Print("Market phase changed to UPTREND (Moderate): ADX = ", adxValue, 
+                  ", EMA Separation = ", emaSeparation, 
+                  ", Bullish Candles = ", bullishCandles);
+      }
+   }
+   // Downtrend detection (kept as original)
+   else if((EMA_Fast[0] < EMA_Slow[0] && emaSeparation > 0.5) || 
+           (minusDI > plusDI && adxValue > 25) || 
+           (bearishCandles >= 7)) {
+      
+      CurrentMarketPhase = PHASE_DOWNTREND;
+      if(prevPhase != PHASE_DOWNTREND)
+         Print("Market phase changed to DOWNTREND: ADX = ", adxValue, 
+               ", EMA Separation = ", emaSeparation, 
+               ", Bearish Candles = ", bearishCandles);
+   }
+   // Volatile market detection
+   else if(atrChange > 20 || bbWidth > 2.0) {
+      CurrentMarketPhase = PHASE_VOLATILE;
+      if(prevPhase != PHASE_VOLATILE)
+         Print("Market phase changed to VOLATILE: ATR Change = ", atrChange, 
+               "%, BB Width = ", bbWidth, "%");
+   }
+   // Ranging market
+   else if(emaSeparation < 0.3 && adxValue < 20) {
+      CurrentMarketPhase = PHASE_RANGING;
+      if(prevPhase != PHASE_RANGING)
+         Print("Market phase changed to RANGING: ADX = ", adxValue, 
+               ", EMA Separation = ", emaSeparation);
+   }
+   // Default - keep previous phase if no clear change detected
 }
 
 //+------------------------------------------------------------------+
@@ -566,64 +732,84 @@ bool IsDailyLossLimitReached() {
 //| Check filters before trading                                     |
 //+------------------------------------------------------------------+
 bool CheckFilters() {
+   Print("Checking filters...");
+   
    // Check volatility filter (ATR)
    double atr_points = ATR_Buffer[0] * _Point;
-   if(atr_points < ATR_MinValue * _Point) {
-      Print("Low volatility: ATR = ", atr_points, " points, minimum required = ", ATR_MinValue * _Point);
-      return false;
-   }
+   bool atrOk = atr_points >= ATR_MinValue * _Point;
+   Print("ATR filter: ", atr_points, " points, min required: ", ATR_MinValue * _Point, " - ", (atrOk ? "PASSED" : "FAILED"));
+   if(!atrOk) return false;
    
    // Check volume filter
-   if(EnableVolumeFilter && Volume_Buffer[0] <= Volume_SMA) {
-      Print("Volume too low: Current = ", Volume_Buffer[0], ", Average = ", Volume_SMA);
-      return false;
+   bool volumeOk = true;
+   if(EnableVolumeFilter) {
+      volumeOk = Volume_Buffer[0] > Volume_SMA;
+      Print("Volume filter: Current = ", Volume_Buffer[0], ", Average = ", Volume_SMA, " - ", (volumeOk ? "PASSED" : "FAILED"));
+      if(!volumeOk) return false;
    }
    
    // Check time filter
+   bool timeOk = true;
    if(EnableTimeFilter) {
       TimeToStruct(TimeCurrent(), dt_struct);
       
       // Check day of week filter
+      bool dayOk = true;
       if((dt_struct.day_of_week == 1 && !MondayFilter) ||
          (dt_struct.day_of_week == 2 && !TuesdayFilter) ||
          (dt_struct.day_of_week == 3 && !WednesdayFilter) ||
          (dt_struct.day_of_week == 4 && !ThursdayFilter) ||
          (dt_struct.day_of_week == 5 && !FridayFilter)) {
-         return false;
+         dayOk = false;
       }
       
       // Check trading hours (EST time)
+      bool hourOk = true;
       int current_hour = dt_struct.hour;
       if(current_hour < StartHour || current_hour >= EndHour) {
-         return false;
+         hourOk = false;
       }
+      
+      timeOk = dayOk && hourOk;
+      Print("Time filter: Day = ", dt_struct.day_of_week, ", Hour = ", current_hour, 
+            " (Range ", StartHour, "-", EndHour, ") - ", (timeOk ? "PASSED" : "FAILED"));
+      if(!timeOk) return false;
    }
    
    // Check news filter
-   if(EnableNewsFilter && IsHighImpactNews()) {
-      Print("High impact news period - trading paused");
-      return false;
+   bool newsOk = true;
+   if(EnableNewsFilter) {
+      newsOk = !IsHighImpactNews();
+      Print("News filter: ", (newsOk ? "PASSED" : "FAILED"));
+      if(!newsOk) return false;
    }
    
    // Add RSI filter
+   bool rsiOk = true;
    if(UseRSIFilter) {
-      // For buy signals: ensure RSI is not overbought and preferably coming from oversold
+      // For buy signals: ensure RSI is not extremely overbought
       if(CurrentSignal == SIGNAL_BUY && RSI_Buffer[0] > RSI_Overbought) {
-         return false;
+         rsiOk = false;
       }
       
-      // For sell signals: ensure RSI is not oversold and preferably coming from overbought
+      // For sell signals: ensure RSI is not extremely oversold
       if(CurrentSignal == SIGNAL_SELL && RSI_Buffer[0] < RSI_Oversold) {
-         return false;
+         rsiOk = false;
       }
+      
+      Print("RSI filter: Current RSI = ", RSI_Buffer[0], " - ", (rsiOk ? "PASSED" : "FAILED"));
+      if(!rsiOk) return false;
    }
    
    // Check daily loss limit
-   if(IsDailyLossLimitReached()) {
-      Print("Daily loss limit of ", DailyLossPercent, "% reached. No new trades allowed today.");
-      return false;
+   bool lossOk = true;
+   if(UseDailyLossLimit) {
+      lossOk = !IsDailyLossLimitReached();
+      Print("Daily loss limit: ", (lossOk ? "PASSED" : "FAILED"));
+      if(!lossOk) return false;
    }
    
+   Print("All filters PASSED");
    return true;
 }
 
@@ -644,16 +830,38 @@ ENUM_TRADE_SIGNAL GetTradeSignal() {
    // Default to no signal
    ENUM_TRADE_SIGNAL signal = SIGNAL_NONE;
    
-   // Check for buy signal
-   if(EMA_Fast[0] > EMA_Slow[0] && // Bullish trend
-      Close[0] > EMA_Fast[0] &&    // Price above Fast EMA 
-      (Close[1] <= EMA_Fast[1] || Close[2] <= EMA_Fast[2]) && // Recent cross or touch of EMA
-      RSI_Buffer[0] > RSI_Buffer[1] && // RSI momentum up
-      (RSI_Buffer[1] < RSI_Oversold || RSI_Buffer[2] < RSI_Oversold)) { // Coming from oversold
-      
+   // Enhanced debug info
+   string debug = "Signal debug: ";
+   bool emaCondition = EMA_Fast[0] > EMA_Slow[0];
+   bool priceCondition = Close[0] > EMA_Fast[0];
+   bool touchCondition = (Close[1] <= EMA_Fast[1] || Close[2] <= EMA_Fast[2]);
+   bool rsiMomentumCondition = RSI_Buffer[0] > RSI_Buffer[1];
+   bool rsiOversoldCondition = (RSI_Buffer[1] < RSI_Oversold || RSI_Buffer[2] < RSI_Oversold);
+   
+   debug += "EMA(F>S): " + (emaCondition ? "YES" : "NO") + ", ";
+   debug += "Price>EMA: " + (priceCondition ? "YES" : "NO") + ", ";
+   debug += "EMA Touch: " + (touchCondition ? "YES" : "NO") + ", ";
+   debug += "RSI Up: " + (rsiMomentumCondition ? "YES" : "NO") + ", ";
+   debug += "RSI was Oversold: " + (rsiOversoldCondition ? "YES" : "NO");
+   Print(debug);
+   
+   // Modified buy signal - relaxed conditions for strong uptrend
+   if(emaCondition && priceCondition) { // Core trend conditions
+      if(CurrentMarketPhase == PHASE_UPTREND) {
+         // In a confirmed uptrend, we're more flexible with other conditions
+         if(rsiMomentumCondition || touchCondition) {
       signal = SIGNAL_BUY;
+            Print("BUY SIGNAL: Uptrend conditions with relaxed parameters");
+         }
+      }
+      // Original strict conditions
+      else if(touchCondition && rsiMomentumCondition && rsiOversoldCondition) {
+         signal = SIGNAL_BUY;
+         Print("BUY SIGNAL: Standard conditions met");
+      }
    }
-   // Check for sell signal
+   
+   // Check for sell signal - keeping original conditions
    else if(EMA_Fast[0] < EMA_Slow[0] && // Bearish trend
            Close[0] < EMA_Fast[0] &&    // Price below Fast EMA
            (Close[1] >= EMA_Fast[1] || Close[2] >= EMA_Fast[2]) && // Recent cross or touch of EMA
@@ -661,6 +869,7 @@ ENUM_TRADE_SIGNAL GetTradeSignal() {
            (RSI_Buffer[1] > RSI_Overbought || RSI_Buffer[2] > RSI_Overbought)) { // Coming from overbought
       
       signal = SIGNAL_SELL;
+      Print("SELL SIGNAL: Standard conditions met");
    }
    
    return signal;
@@ -672,8 +881,8 @@ ENUM_TRADE_SIGNAL GetTradeSignal() {
 int CalculateTradeProbability(ENUM_TRADE_SIGNAL signal) {
    int probability = 0;
    
-   // Force a minimum base probability for debugging
-   probability = 5;
+   // Start with base probability
+   probability = 10; // Minimum base
    
    // Even if no signal, calculate a probability based on market conditions
    if(signal == SIGNAL_NONE) {
@@ -682,75 +891,105 @@ int CalculateTradeProbability(ENUM_TRADE_SIGNAL signal) {
       bool potentialSell = (EMA_Fast[0] < EMA_Slow[0] && Close[0] < EMA_Fast[0]);
       
       if(potentialBuy || potentialSell) {
-         probability = 20; // Base probability for potential signal
+         probability = 25; // Base probability for potential signal
       }
    } else {
       // Base score - having a valid signal gives 40 points
       probability = 40;
    }
    
-   // Add points based on trend strength
+   // Add points based on trend strength - use the same calculation as indicator
    double emaSeparation = MathAbs(EMA_Fast[0] - EMA_Slow[0]) / ATR_Buffer[0];
-   int trendPoints = (int)MathMin(emaSeparation * 50, 20);
+   int trendPoints = (int)MathMin(emaSeparation * 70, 25); // Increased weight for trend strength
    probability += trendPoints;
    
-   // Add points based on RSI strength
+   // Add points based on RSI strength - match indicator calculation
    if(signal == SIGNAL_BUY || (signal == SIGNAL_NONE && EMA_Fast[0] > EMA_Slow[0])) {
-      // For buy, better if RSI was recently oversold and now rising
-      if(RSI_Buffer[1] < RSI_Oversold || RSI_Buffer[2] < RSI_Oversold) {
-         probability += 15;
+      // For buy signals
+      if(RSI_Buffer[0] > 50 && RSI_Buffer[0] < RSI_Overbought - 5) {
+         probability += 10; // Bullish but not overbought
       }
       
-      // Strength of RSI momentum
+      // For recently oversold conditions
+      if(RSI_Buffer[1] < RSI_Oversold || RSI_Buffer[2] < RSI_Oversold) {
+         probability += 15; // Coming from oversold is bullish
+      }
+      
+      // For upward momentum
       double rsiMomentum = RSI_Buffer[0] - RSI_Buffer[1];
-      probability += (int)MathMin(rsiMomentum * 2, 10);
+      probability += (int)MathMin(rsiMomentum * 3, 15); // Increased weight for momentum
    }
    else if(signal == SIGNAL_SELL || (signal == SIGNAL_NONE && EMA_Fast[0] < EMA_Slow[0])) {
-      // For sell, better if RSI was recently overbought and now falling
-      if(RSI_Buffer[1] > RSI_Overbought || RSI_Buffer[2] > RSI_Overbought) {
-         probability += 15;
+      // For sell signals
+      if(RSI_Buffer[0] < 50 && RSI_Buffer[0] > RSI_Oversold + 5) {
+         probability += 10; // Bearish but not oversold
       }
       
-      // Strength of RSI momentum
+      // For recently overbought conditions
+      if(RSI_Buffer[1] > RSI_Overbought || RSI_Buffer[2] > RSI_Overbought) {
+         probability += 15; // Coming from overbought is bearish
+      }
+      
+      // For downward momentum
       double rsiMomentum = RSI_Buffer[1] - RSI_Buffer[0];
-      probability += (int)MathMin(rsiMomentum * 2, 10);
+      probability += (int)MathMin(rsiMomentum * 3, 15); // Increased weight for momentum
    }
    
-   // Add points based on volume strength
-   double volumeRatio = (double)Volume_Buffer[0] / Volume_SMA;
-   int volumePoints = (int)MathMin((volumeRatio - 1.0) * 30, 15);
-   if(volumePoints > 0) probability += volumePoints;
+   // Add ADX influence for trend strength - this matches the indicator better
+   double adxValue = 0;
+   double plusDI = 0;
+   double minusDI = 0;
    
-   // Add points if signal persists (stability factor)
-   probability += (int)MathMin(SignalTimer, 10);
+   // Use custom ADX calculations
+   int adx_handle = iADX(_Symbol, PERIOD_CURRENT, 14);
+   if(adx_handle != INVALID_HANDLE) {
+      double adx_buffer[];
+      double plusdi_buffer[];
+      double minusdi_buffer[];
+      
+      ArraySetAsSeries(adx_buffer, true);
+      ArraySetAsSeries(plusdi_buffer, true);
+      ArraySetAsSeries(minusdi_buffer, true);
+      
+      CopyBuffer(adx_handle, 0, 0, 3, adx_buffer);
+      CopyBuffer(adx_handle, 1, 0, 3, plusdi_buffer);
+      CopyBuffer(adx_handle, 2, 0, 3, minusdi_buffer);
+      
+      adxValue = adx_buffer[0];
+      plusDI = plusdi_buffer[0];
+      minusDI = minusdi_buffer[0];
+      
+      // Add ADX-based points
+      if(adxValue > 25) probability += 10;  // Strong trend
+      else if(adxValue > 15) probability += 5;  // Medium trend
+      
+      IndicatorRelease(adx_handle);
+   }
    
-   // Market condition factor - updated for more specific market phases
+   // Market condition factor - updated to match indicator
    switch(CurrentMarketPhase) {
       case PHASE_UPTREND:
          // Higher probability for buy signals in uptrend
-         if(signal == SIGNAL_BUY) probability += 10;
-         else if(signal == SIGNAL_SELL) probability -= 5; // Counter-trend trade
+         if(signal == SIGNAL_BUY) probability += 15;
+         else if(signal == SIGNAL_SELL) probability -= 10; // Counter-trend trade
          break;
       case PHASE_DOWNTREND:
          // Higher probability for sell signals in downtrend
-         if(signal == SIGNAL_SELL) probability += 10;
-         else if(signal == SIGNAL_BUY) probability -= 5; // Counter-trend trade
+         if(signal == SIGNAL_SELL) probability += 15;
+         else if(signal == SIGNAL_BUY) probability -= 10; // Counter-trend trade
          break;
       case PHASE_RANGING:
-         // Lower probability in ranging markets
+         // Slightly lower probability in ranging markets
          probability -= 5;
          break;
       case PHASE_VOLATILE:
          // Higher risk in volatile markets
-         probability -= 3;
+         probability -= 10;
          break;
    }
    
-   // Make sure probability is never below 5%
-   probability = MathMax(probability, 5);
-   
-   // Cap at 100
-   probability = MathMin(probability, 100);
+   // Cap at 100, minimum 5
+   probability = MathMax(MathMin(probability, 100), 5);
    
    return probability;
 }
@@ -849,11 +1088,11 @@ void CreateDashboard() {
 //| Update dashboard with current information                        |
 //+------------------------------------------------------------------+
 void UpdateDashboard() {
-   // Make sure we recalculate probability before updating dashboard
-   // This ensures the most current value is displayed
-   if(CurrentProbability <= 0) {
-      CurrentProbability = CalculateTradeProbability(CurrentSignal);
-   }
+   // Force recalculation of indicators to ensure the most current data
+   UpdateIndicators();
+   
+   // Recalculate probability with the current values
+   CurrentProbability = CalculateTradeProbability(CurrentSignal);
 
    // Update signal
    string signalText = "Signal: ";
@@ -905,15 +1144,26 @@ void UpdateDashboard() {
    ObjectSetString(0, DashboardPhase, OBJPROP_TEXT, phaseText);
    ObjectSetInteger(0, DashboardPhase, OBJPROP_COLOR, phaseColor);
    
-   // Update probability - Debug directly to make sure value is correct
+   // Update probability display - match the indicator's probability format for consistency
    string probText = "Trade Probability: " + IntegerToString(CurrentProbability) + "%";
    color probColor = DashboardTextColor;
    
    if(CurrentProbability >= 80) probColor = clrLime;
+   else if(CurrentProbability >= 70) probColor = clrLime; // Make 70%+ also green
    else if(CurrentProbability >= 60) probColor = clrYellow;
    else if(CurrentProbability >= 40) probColor = clrOrange;
-   else if(CurrentProbability >= 20) probColor = clrPink;
    else probColor = clrRed; // Low probability
+   
+   // Add trade status indicator
+   if(CurrentProbability >= 60) {
+      probText += " (READY)";
+   }
+   else if(CurrentProbability >= 40) {
+      probText += " (MONITORING)";
+   }
+   else {
+      probText += " (WAITING)";
+   }
    
    ObjectSetString(0, DashboardProbability, OBJPROP_TEXT, probText);
    ObjectSetInteger(0, DashboardProbability, OBJPROP_COLOR, probColor);
@@ -925,11 +1175,31 @@ void UpdateDashboard() {
       Print("Warning: Invalid RSI value, using default");
    }
    
+   string rsiText = "RSI: " + DoubleToString(rsiValue, 1);
    color rsiColor = DashboardTextColor;
-   if(rsiValue > RSI_Overbought) rsiColor = clrRed;
-   else if(rsiValue < RSI_Oversold) rsiColor = clrLime;
    
-   ObjectSetString(0, DashboardRSI, OBJPROP_TEXT, "RSI: " + DoubleToString(rsiValue, 1));
+   // Enhanced RSI interpretation
+   if(rsiValue > RSI_Overbought) {
+      rsiText += " (OVERBOUGHT)";
+      rsiColor = clrRed;
+   }
+   else if(rsiValue < RSI_Oversold) {
+      rsiText += " (OVERSOLD)";
+      rsiColor = clrLime;
+   }
+   else if(rsiValue > 60) {
+      rsiText += " (BULLISH)";
+      rsiColor = clrLime;
+   }
+   else if(rsiValue < 40) {
+      rsiText += " (BEARISH)";
+      rsiColor = clrRed;
+   }
+   else {
+      rsiText += " (NEUTRAL)";
+   }
+   
+   ObjectSetString(0, DashboardRSI, OBJPROP_TEXT, rsiText);
    ObjectSetInteger(0, DashboardRSI, OBJPROP_COLOR, rsiColor);
    
    // Update ATR - protect against invalid values
@@ -941,10 +1211,22 @@ void UpdateDashboard() {
    
    double atrPoints = atrValue / _Point;
    color atrColor = DashboardTextColor;
-   if(atrPoints > ATR_MinValue * 2) atrColor = clrRed; // High volatility
-   else if(atrPoints < ATR_MinValue) atrColor = clrYellow; // Low volatility
    
-   ObjectSetString(0, DashboardATR, OBJPROP_TEXT, "ATR: " + DoubleToString(atrPoints, 1) + " pts");
+   string atrStatus = "";
+   if(atrPoints > ATR_MinValue * 2) {
+      atrStatus = " (HIGH)";
+      atrColor = clrYellow;
+   }
+   else if(atrPoints >= ATR_MinValue) {
+      atrStatus = " (ADEQUATE)";
+      atrColor = clrLime;
+   }
+   else {
+      atrStatus = " (LOW)";
+      atrColor = clrRed;
+   }
+   
+   ObjectSetString(0, DashboardATR, OBJPROP_TEXT, "ATR: " + DoubleToString(atrPoints, 1) + " pts" + atrStatus);
    ObjectSetInteger(0, DashboardATR, OBJPROP_COLOR, atrColor);
    
    // Force chart redraw
@@ -1009,12 +1291,21 @@ string MarketPhaseToString(ENUM_MARKET_PHASE phase) {
 //| Execute trade based on signal                                    |
 //+------------------------------------------------------------------+
 void ExecuteTrade(ENUM_TRADE_SIGNAL signal) {
+   // Add a debugging print statement to confirm we're attempting to execute a trade
+   Print("Attempting to execute trade: ", SignalToString(signal));
+   
    // Get current symbol information
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   
+   // Verify we have valid prices
+   if(ask <= 0 || bid <= 0) {
+      Print("ERROR: Invalid prices - Ask: ", ask, ", Bid: ", bid);
+      return;
+   }
    
    // Calculate ATR multiplier based on market phase
    double tpMultiplier = ATR_Multiplier_TP;
@@ -1037,6 +1328,13 @@ void ExecuteTrade(ENUM_TRADE_SIGNAL signal) {
    
    // Calculate TP and SL distances based on ATR
    double atrValue = ATR_Buffer[0];
+   
+   // Verify ATR is valid
+   if(atrValue <= 0) {
+      Print("ERROR: Invalid ATR value: ", atrValue, ". Using minimum value instead.");
+      atrValue = 10 * _Point; // Use a minimum value
+   }
+   
    double tpDistance = atrValue * tpMultiplier;
    double slDistance = atrValue * slMultiplier;
    
@@ -1058,6 +1356,7 @@ void ExecuteTrade(ENUM_TRADE_SIGNAL signal) {
       else if(currentPair == "GBPUSD") pairSettings = GBPUSD_Settings;
       else if(currentPair == "USDJPY") pairSettings = USDJPY_Settings;
       else if(currentPair == "AUDUSD") pairSettings = AUDUSD_Settings;
+      else pairSettings = ALL_Settings;
       
       // Parse settings if available
       if(pairSettings != "") {
@@ -1094,10 +1393,25 @@ void ExecuteTrade(ENUM_TRADE_SIGNAL signal) {
    // Calculate lot size
    double lotSize = CalculateLotSize(slDistance);
    
+   // Verify lot size is valid
+   if(lotSize <= 0) {
+      Print("ERROR: Invalid lot size: ", lotSize, ". Using minimum lot size.");
+      lotSize = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   }
+   
    // Execute trade based on signal
    if(signal == SIGNAL_BUY) {
       double tp = NormalizeDouble(ask + tpDistance, digits);
       double sl = NormalizeDouble(bid - slDistance, digits);
+      
+      // Verify we have valid TP/SL
+      if(tp <= ask || sl >= bid) {
+         Print("ERROR: Invalid TP/SL values - TP: ", tp, ", SL: ", sl, 
+               ", Ask: ", ask, ", Bid: ", bid);
+         return;
+      }
+      
+      Print("Attempting to OPEN BUY: Lot=", lotSize, ", SL=", sl, ", TP=", tp);
       
       if(Trade.Buy(lotSize, _Symbol, 0, sl, tp, TradeComment)) {
          // Add to active trades array
@@ -1147,10 +1461,24 @@ void ExecuteTrade(ENUM_TRADE_SIGNAL signal) {
             }
          }
       }
+      else {
+         // Print error if trade failed
+         Print("ERROR: Buy order failed! Error code: ", GetLastError(), 
+               ", Error description: ", Trade.ResultRetcodeDescription());
+      }
    }
    else if(signal == SIGNAL_SELL) {
       double tp = NormalizeDouble(bid - tpDistance, digits);
       double sl = NormalizeDouble(ask + slDistance, digits);
+      
+      // Verify we have valid TP/SL
+      if(tp >= bid || sl <= ask) {
+         Print("ERROR: Invalid TP/SL values - TP: ", tp, ", SL: ", sl, 
+               ", Ask: ", ask, ", Bid: ", bid);
+         return;
+      }
+      
+      Print("Attempting to OPEN SELL: Lot=", lotSize, ", SL=", sl, ", TP=", tp);
       
       if(Trade.Sell(lotSize, _Symbol, 0, sl, tp, TradeComment)) {
          // Add to active trades array
@@ -1200,6 +1528,11 @@ void ExecuteTrade(ENUM_TRADE_SIGNAL signal) {
             }
          }
       }
+      else {
+         // Print error if trade failed
+         Print("ERROR: Sell order failed! Error code: ", GetLastError(), 
+               ", Error description: ", Trade.ResultRetcodeDescription());
+      }
    }
 }
 
@@ -1245,6 +1578,9 @@ void ManagePositions() {
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   
+   // First, check for manual trades and optimize their TP settings
+   DetectAndOptimizeManualTrades();
    
    // Loop through active trades
    for(int i = 0; i < ArraySize(ActiveTrades); i++) {
@@ -1318,4 +1654,381 @@ void ManagePositions() {
          }
       }
    }
+}
+
+//+------------------------------------------------------------------+
+//| Detect manual trades and set optimal take profit                 |
+//+------------------------------------------------------------------+
+void DetectAndOptimizeManualTrades() {
+   // Strict time check to avoid excessive runs
+   static datetime lastCheckTime = 0;
+   if(TimeCurrent() - lastCheckTime < 30) { // Run at most every 30 seconds
+      return;
+   }
+   lastCheckTime = TimeCurrent();
+   
+   Print("===== CHECKING FOR MANUAL TRADES =====");
+   
+   // Get current symbol information
+   string currentSymbol = _Symbol;
+   double point = SymbolInfoDouble(currentSymbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(currentSymbol, SYMBOL_DIGITS);
+   double ask = SymbolInfoDouble(currentSymbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(currentSymbol, SYMBOL_BID);
+   
+   Print("Current Symbol: ", currentSymbol);
+   Print("Current Price: Bid=", DoubleToString(bid, digits), " Ask=", DoubleToString(ask, digits));
+   
+   // Track whether we found any trades to optimize
+   bool anyTradesOptimized = false;
+   
+   // Get all positions
+   for(int i = 0; i < PositionsTotal(); i++) {
+      ulong ticket = PositionGetTicket(i);
+      
+      if(ticket <= 0) {
+         Print("Failed to get position ticket #", i);
+         continue;
+      }
+      
+      // Check if this position is for the current symbol
+      if(PositionGetString(POSITION_SYMBOL) != currentSymbol) {
+         continue;
+      }
+      
+      // Skip positions already managed by our EA (using MagicNumber)
+      if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
+         continue;
+      }
+      
+      // This is a manual trade or from another EA - let's check if it needs optimization
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double currentSL = PositionGetDouble(POSITION_SL);
+      double currentTP = PositionGetDouble(POSITION_TP);
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      
+      Print("Found manual position #", ticket, " - Type: ", (posType == POSITION_TYPE_BUY ? "BUY" : "SELL"), 
+            ", Open Price: ", DoubleToString(openPrice, digits), 
+            ", Current SL: ", DoubleToString(currentSL, digits),
+            ", Current TP: ", DoubleToString(currentTP, digits));
+      
+      // Check for invalid/default TP values
+      bool needsOptimization = false;
+      
+      // Case 1: No TP set
+      if(currentTP == 0) {
+         Print("Position #", ticket, " has no TP set - will optimize");
+         needsOptimization = true; 
+      }
+      // Case 2: Buy position with TP too close or below entry
+      else if(posType == POSITION_TYPE_BUY && (currentTP <= openPrice || currentTP - openPrice < 10 * point)) {
+         Print("BUY position #", ticket, " has invalid TP (", DoubleToString(currentTP, digits), 
+               ") too close to entry price (", DoubleToString(openPrice, digits), ") - will optimize");
+         needsOptimization = true;
+      }
+      // Case 3: Sell position with TP too close or above entry
+      else if(posType == POSITION_TYPE_SELL && (currentTP >= openPrice || openPrice - currentTP < 10 * point)) {
+         Print("SELL position #", ticket, " has invalid TP (", DoubleToString(currentTP, digits), 
+               ") too close to entry price (", DoubleToString(openPrice, digits), ") - will optimize");
+         needsOptimization = true;
+      }
+      // Case 4: TP far from current market (could be outdated)
+      else if((posType == POSITION_TYPE_BUY && MathAbs(currentTP - bid) > 300 * point) ||
+              (posType == POSITION_TYPE_SELL && MathAbs(currentTP - ask) > 300 * point)) {
+         Print("Position #", ticket, " has TP (", DoubleToString(currentTP, digits),
+               ") far from current market - will re-optimize");
+         needsOptimization = true;
+      }
+      
+      if(needsOptimization) {
+         // Calculate optimal TP based on current market conditions
+         double optimalTP = CalculateOptimalTakeProfit(posType, openPrice);
+         
+         // Verify calculated TP is valid
+         bool isValidTp = (optimalTP > 0) &&
+                         ((posType == POSITION_TYPE_BUY && optimalTP > openPrice) ||
+                          (posType == POSITION_TYPE_SELL && optimalTP < openPrice));
+         
+         if(!isValidTp) {
+            Print("WARNING: Failed to calculate valid TP for position #", ticket);
+            continue;
+         }
+         
+         // Safety check: for buy positions, make sure TP isn't too high
+         if(posType == POSITION_TYPE_BUY && optimalTP > openPrice + 200 * point) {
+            Print("WARNING: Calculated TP is too high - limiting to 200 pips from entry");
+            optimalTP = NormalizeDouble(openPrice + 200 * point, digits);
+         }
+         // Safety check: for sell positions, make sure TP isn't too low
+         else if(posType == POSITION_TYPE_SELL && optimalTP < openPrice - 200 * point) {
+            Print("WARNING: Calculated TP is too low - limiting to 200 pips from entry");
+            optimalTP = NormalizeDouble(openPrice - 200 * point, digits);
+         }
+         
+         // Only modify if new TP is better than current
+         bool shouldModify = (currentTP == 0) || // No TP set
+                             (posType == POSITION_TYPE_BUY && optimalTP > currentTP) || // Better buy TP
+                             (posType == POSITION_TYPE_SELL && optimalTP < currentTP); // Better sell TP
+         
+         if(shouldModify) {
+            Print("Modifying position #", ticket, " - setting TP to ", DoubleToString(optimalTP, digits));
+            
+            // Don't modify SL - only update TP
+            if(Trade.PositionModify(ticket, currentSL, optimalTP)) {
+               Print("✓ SUCCESS: Optimized TP for ticket #", ticket, 
+                     " to ", DoubleToString(optimalTP, digits), 
+                     " (", DoubleToString(MathAbs(optimalTP - openPrice) / point, 1), " pips)");
+               anyTradesOptimized = true;
+            } else {
+               Print("✗ ERROR: Failed to modify position #", ticket, " - Error: ", GetLastError());
+            }
+         } else {
+            Print("Current TP is already optimal or better than calculated TP - no modification needed");
+         }
+      } else {
+         Print("Position #", ticket, " has appropriate TP - no optimization needed");
+      }
+   }
+   
+   if(!anyTradesOptimized) {
+      Print("No manual trades found or all trades already have optimal TP levels");
+   }
+   
+   Print("===== MANUAL TRADE CHECK COMPLETED =====");
+}
+
+//+------------------------------------------------------------------+
+//| Calculate optimal take profit based on market conditions         |
+//+------------------------------------------------------------------+
+double CalculateOptimalTakeProfit(ENUM_POSITION_TYPE posType, double openPrice) {
+   // Get proper symbol information for correct calculations
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // Print debug information
+   Print("---- TP CALCULATION DEBUG ----");
+   Print("Symbol: ", _Symbol);
+   Print("Position Type: ", (posType == POSITION_TYPE_BUY ? "BUY" : "SELL"));
+   Print("Open Price: ", DoubleToString(openPrice, digits));
+   Print("Current Ask/Bid: ", DoubleToString(ask, digits), "/", DoubleToString(bid, digits));
+   Print("Symbol Point: ", DoubleToString(point, digits));
+   Print("Symbol Digits: ", digits);
+   
+   // Get current ATR for volatility-based TP
+   double atrValue = ATR_Buffer[0];
+   if(atrValue <= 0) {
+      Print("ATR is invalid, using minimum value");
+      atrValue = 15 * point; // Increased minimum value for safer TP
+   }
+   Print("ATR Value: ", DoubleToString(atrValue, digits));
+   
+   // Enhanced TP calculation for manual trades
+   // Start with a higher base multiplier for manual trades
+   double tpMultiplier = ATR_Multiplier_TP * 2.0; // Double the normal multiplier
+   Print("Base ATR multiplier (enhanced): ", DoubleToString(tpMultiplier, 2));
+   
+   // Adjust multiplier based on market phase with more aggressive settings
+   if(UseDynamicMultiplier) {
+      double phaseMultiplier = 1.0;
+      
+      switch(CurrentMarketPhase) {
+         case PHASE_UPTREND:
+            phaseMultiplier = 2.0; // More aggressive TP in strong uptrend
+            if(posType == POSITION_TYPE_BUY) phaseMultiplier *= 1.2; // Extra boost for buys in uptrend
+            break;
+         case PHASE_DOWNTREND:
+            phaseMultiplier = 2.0; // More aggressive TP in strong downtrend
+            if(posType == POSITION_TYPE_SELL) phaseMultiplier *= 1.2; // Extra boost for sells in downtrend
+            break;
+         case PHASE_RANGING:
+            phaseMultiplier = 1.5; // Moderate but still profitable TP in ranging market
+            break;
+         case PHASE_VOLATILE:
+            phaseMultiplier = 2.5; // More aggressive TP in volatile markets for better profit potential
+            break;
+      }
+      
+      tpMultiplier *= phaseMultiplier;
+      Print("Market phase: ", MarketPhaseToString(CurrentMarketPhase), 
+            ", adjusted multiplier: ", DoubleToString(tpMultiplier, 2));
+   }
+   
+   // Consider RSI for additional TP adjustment
+   if(RSI_Buffer[0] > 70 && posType == POSITION_TYPE_BUY) {
+      tpMultiplier *= 0.8; // Reduce TP distance for buys in overbought conditions
+      Print("RSI overbought adjustment for BUY");
+   }
+   else if(RSI_Buffer[0] < 30 && posType == POSITION_TYPE_SELL) {
+      tpMultiplier *= 0.8; // Reduce TP distance for sells in oversold conditions
+      Print("RSI oversold adjustment for SELL");
+   }
+   
+   // Calculate TP distance based on ATR and enhanced multiplier
+   double tpDistance = atrValue * tpMultiplier;
+   
+   // Set minimum TP distance to ensure worthwhile profit potential
+   // Minimum 30 pips or current ATR value, whichever is larger
+   double minDistance = MathMax(30 * point, atrValue);
+   if(tpDistance < minDistance) {
+      Print("Adjusting to minimum safe TP distance");
+      tpDistance = minDistance;
+   }
+   
+   // Cap maximum TP distance at 150 pips or 3x ATR, whichever is larger
+   double maxDistance = MathMax(150 * point, atrValue * 3);
+   if(tpDistance > maxDistance) {
+      Print("Capping TP distance to maximum safe level");
+      tpDistance = maxDistance;
+   }
+   
+   Print("Final TP distance: ", DoubleToString(tpDistance, digits), 
+         " (", DoubleToString(tpDistance / point, 1), " pips)");
+   
+   // Calculate TP level based on position type
+   double tpLevel;
+   if(posType == POSITION_TYPE_BUY) {
+      tpLevel = NormalizeDouble(openPrice + tpDistance, digits);
+      Print("BUY TP calculation: ", DoubleToString(openPrice, digits), " + ", 
+            DoubleToString(tpDistance, digits), " = ", DoubleToString(tpLevel, digits));
+   } else {
+      tpLevel = NormalizeDouble(openPrice - tpDistance, digits);
+      Print("SELL TP calculation: ", DoubleToString(openPrice, digits), " - ", 
+            DoubleToString(tpDistance, digits), " = ", DoubleToString(tpLevel, digits));
+   }
+   
+   // Additional safety checks
+   if(posType == POSITION_TYPE_BUY) {
+      // Ensure minimum 30 pip distance for buy orders
+      if(tpLevel - openPrice < 30 * point) {
+         tpLevel = NormalizeDouble(openPrice + 30 * point, digits);
+         Print("Adjusted BUY TP to minimum 30 pip distance");
+      }
+   } else {
+      // Ensure minimum 30 pip distance for sell orders
+      if(openPrice - tpLevel < 30 * point) {
+         tpLevel = NormalizeDouble(openPrice - 30 * point, digits);
+         Print("Adjusted SELL TP to minimum 30 pip distance");
+      }
+   }
+   
+   Print("Final TP level: ", DoubleToString(tpLevel, digits));
+   return tpLevel;
+}
+
+//+------------------------------------------------------------------+
+//| Check auto trading permissions and log status                    |
+//+------------------------------------------------------------------+
+void CheckAutoTradingPermissions() {
+   bool canAutoTrade = true;
+   string errorMessage = "Auto-trading status check:\n";
+   
+   // Check if EA input allows trading
+   if(!EnableTrading) {
+      errorMessage += "- ERROR: Trading is disabled in EA parameters. Set EnableTrading=true\n";
+      canAutoTrade = false;
+   } else {
+      errorMessage += "- EnableTrading parameter: OK\n";
+   }
+   
+   // Check if terminal allows auto-trading (button in MT5)
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) {
+      errorMessage += "- ERROR: Trading is not allowed in terminal. Click 'AutoTrading' button in MT5\n";
+      canAutoTrade = false;
+   } else {
+      errorMessage += "- Terminal AutoTrading permission: OK\n";
+   }
+   
+   // Check if EA has permissions to trade
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) {
+      errorMessage += "- ERROR: This EA is not allowed to trade. Enable 'Allow live trading' in EA settings\n";
+      canAutoTrade = false;
+   } else {
+      errorMessage += "- EA live trading permission: OK\n";
+   }
+   
+   // Check if account allows trading
+   if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED)) {
+      errorMessage += "- ERROR: Trading is not allowed for this account. Check with your broker\n";
+      canAutoTrade = false;
+   } else {
+      errorMessage += "- Account trading permission: OK\n";
+   }
+   
+   // Print the full report
+   Print(errorMessage);
+   
+   // Show alert if can't auto-trade
+   if(!canAutoTrade) {
+      string alertMessage = "FG ScalpingPro EA cannot auto-trade. Check MT5 logs for details.";
+      if(!EnableTrading) {
+         alertMessage = "FG ScalpingPro EA: Trading is disabled. Set EnableTrading=true in EA parameters.";
+      } else if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) {
+         alertMessage = "FG ScalpingPro EA: Click the 'AutoTrading' button in MT5 to enable trading.";
+      }
+      
+      Alert(alertMessage);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check if the EA is having trouble generating signals              |
+//+------------------------------------------------------------------+
+void MonitorSignalGeneration() {
+   // Check every hour if we've generated any signals
+   if(TimeCurrent() - LastSignalCheckTime > 3600) { // 1 hour interval
+      LastSignalCheckTime = TimeCurrent();
+      
+      // If we've had a signal recently (within 4 hours), reset counter
+      if(LastSignalFoundTime > 0 && TimeCurrent() - LastSignalFoundTime < 14400) {
+         NoSignalCounter = 0;
+         return;
+      }
+      
+      // Increment counter for each hour without signals
+      NoSignalCounter++;
+      
+      // After 8 hours with no signals (during market hours), warn user
+      if(NoSignalCounter >= 8) {
+         // Only alert every 8 hours to avoid spam
+         if(NoSignalCounter % 8 == 0) {
+            string message = "WARNING: No trade signals have been generated for " + 
+                             IntegerToString(NoSignalCounter) + " hours. Check configuration and market conditions.";
+            Print(message);
+            if(EnableAlerts) Alert(message);
+            
+            // Perform detailed check of indicators
+            double rsi = RSI_Buffer[0];
+            double atr = ATR_Buffer[0] * _Point;
+            double emaFast = EMA_Fast[0];
+            double emaSlow = EMA_Slow[0];
+            double emaDiff = emaFast - emaSlow;
+            
+            Print("Detailed indicator status:");
+            Print("RSI(14): ", DoubleToString(rsi, 1), " (Oversold < ", RSI_Oversold, ", Overbought > ", RSI_Overbought, ")");
+            Print("ATR(14): ", DoubleToString(atr, 1), " points (Min required: ", ATR_MinValue * _Point, ")");
+            Print("EMA Fast-Slow Gap: ", DoubleToString(emaDiff, _Digits), " (", (emaDiff > 0 ? "Bullish" : "Bearish"), ")");
+            Print("Market Phase: ", MarketPhaseToString(CurrentMarketPhase));
+            Print("Current Close Price: ", DoubleToString(Close[0], _Digits));
+            
+            // Additional troubleshooting suggestions
+            Print("Troubleshooting tips:");
+            if(rsi > RSI_Overbought - 5) Print("- RSI is near overbought, preventing buy signals");
+            if(rsi < RSI_Oversold + 5) Print("- RSI is near oversold, preventing sell signals");
+            if(atr < ATR_MinValue * _Point) Print("- ATR is below minimum threshold, preventing trades due to low volatility");
+            if(MathAbs(emaDiff) < 0.0002) Print("- EMAs are too close, waiting for clearer trend direction");
+            if(EnableTimeFilter) Print("- Check if current trading time is within allowed hours (", StartHour, "-", EndHour, " EST)");
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Record when a valid signal is found                               |
+//+------------------------------------------------------------------+
+void RecordSignalFound() {
+   LastSignalFoundTime = TimeCurrent();
+   NoSignalCounter = 0; // Reset counter when valid signal found
 } 
